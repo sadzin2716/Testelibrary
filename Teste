@@ -1,0 +1,465 @@
+--!strict
+-- =============================================================================
+-- KAZEUI ENTERPRISE v1.0.0 UNIFIED DISTRIBUTABLE
+-- AUTOCONTIDO • COPIAR E COLAR NO GITHUB PARA USO VIA LOADSTRING
+-- =============================================================================
+
+local KazeUI = {}
+
+-- =============================================================================
+-- [1] CORE: REGISTRY SYSTEM
+-- =============================================================================
+local Registry = {}
+local _idCounter = 0
+local _registry = setmetatable({}, { __mode = "v" })
+local _metadata = {}
+
+function Registry.GenerateId(component: any, tag: string): number
+    _idCounter += 1
+    local id = _idCounter
+    _registry[id] = component
+    _metadata[id] = { Tag = tag, CreatedAt = os.clock(), Cleanups = {} }
+    return id
+end
+
+function Registry.BindCleanup(id: number, cleanup: () -> ())
+    local meta = _metadata[id]
+    if meta then table.insert(meta.Cleanups, cleanup) else cleanup() end
+end
+
+function Registry.Destroy(id: number)
+    local meta = _metadata[id]
+    if meta then
+        for i = #meta.Cleanups, 1, -1 do
+            pcall(meta.Cleanups[i])
+        end
+        _metadata[id] = nil
+    end
+    _registry[id] = nil
+end
+
+-- =============================================================================
+-- [2] CORE: STATE GRAPH ENGINE (REATIVIDADE ATÔMICA SEM DIAMOND PROBLEM)
+-- =============================================================================
+local StateGraph = { _activeContext = nil, _batchDepth = 0, _batchQueue = setmetatable({}, { __mode = "k" }), _evalStack = {} }
+
+local function sortTopological(node: any, sorted: {any}, visited: { [any]: boolean }, stack: { [any]: boolean })
+    if stack[node] then error("[KazeUI] Ciclo circular detectado no Grafo de Estados!") end
+    if visited[node] then return end
+    stack[node] = true
+    for dep in pairs(node._dependents) do sortTopological(dep, sorted, visited, stack) end
+    stack[node] = nil
+    visited[node] = true
+    table.insert(sorted, 1, node)
+end
+
+function StateGraph.CreateState(initialValue: any)
+    local self = setmetatable({}, { __mode = "v" }) :: any
+    self._value = initialValue
+    self._dependents = setmetatable({}, { __mode = "k" })
+    self._dependencies = setmetatable({}, { __mode = "k" })
+    self._observers = setmetatable({}, { __mode = "k" })
+    self._destroyed = false
+    
+    function self:Get()
+        if self._destroyed then return self._value end
+        if StateGraph._activeContext then
+            StateGraph._activeContext._dependencies[self] = true
+            self._dependents[StateGraph._activeContext] = true
+        end
+        return self._value
+    end
+    
+    function self:Set(newValue: any)
+        if self._destroyed or self._value == newValue then return end
+        if StateGraph._batchDepth > 0 then StateGraph._batchQueue[self] = newValue return end
+        self._value = newValue
+        local sorted = {}
+        sortTopological(self, sorted, {}, {})
+        for i = #sorted, 1, -1 do
+            local nextNode = sorted[i]
+            if nextNode._processor then
+                local ok, res = pcall(nextNode._processor)
+                if ok then nextNode._value = res end
+            end
+            for _, obs in pairs(nextNode._observers) do task.spawn(obs, nextNode._value) end
+        end
+    end
+    
+    function self:Destroy()
+        self._destroyed = true
+        table.clear(self._dependents)
+        table.clear(self._dependencies)
+        table.clear(self._observers)
+    end
+    return self
+end
+
+function StateGraph.CreateComputed(processor: () -> any)
+    local self = setmetatable({}, { __mode = "v" }) :: any
+    self._dependents = setmetatable({}, { __mode = "k" })
+    self._dependencies = setmetatable({}, { __mode = "k" })
+    self._observers = setmetatable({}, { __mode = "k" })
+    self._processor = processor
+    self._destroyed = false
+    
+    table.insert(StateGraph._evalStack, StateGraph._activeContext)
+    StateGraph._activeContext = self
+    local ok, initVal = pcall(processor)
+    StateGraph._activeContext = table.remove(StateGraph._evalStack)
+    self._value = ok and initVal or nil
+    
+    function self:Get()
+        if self._destroyed then return self._value end
+        if StateGraph._activeContext then
+            StateGraph._activeContext._dependencies[self] = true
+            self._dependents[StateGraph._activeContext] = true
+        end
+        return self._value
+    end
+    function self:Set() error("[KazeUI] Computeds são somente leitura.") end
+    function self:Destroy()
+        self._destroyed = true
+        for dep in pairs(self._dependencies) do dep._dependents[self] = nil end
+        table.clear(self._dependents) table.clear(self._dependencies) table.clear(self._observers)
+    end
+    return self
+end
+
+function StateGraph.Observe(node: any, callback: (any) -> ()): () -> ()
+    local token = {}
+    node._observers[token] = callback
+    callback(node._value)
+    return function() node._observers[token] = nil end
+end
+
+function StateGraph.Batch(callback: () -> ())
+    StateGraph._batchDepth += 1
+    local ok, err = pcall(callback)
+    StateGraph._batchDepth -= 1
+    if StateGraph._batchDepth == 0 then
+        local q = StateGraph._batchQueue
+        StateGraph._batchQueue = setmetatable({}, { __mode = "k" })
+        for node, val in pairs(q) do node:Set(val) end
+    end
+    if not ok then error(err) end
+end
+
+-- =============================================================================
+-- [3] CORE: ANALYTICAL MOTION ENGINE (FÍSICA ZERO ALOCAÇÃO NO HEARTBEAT)
+-- =============================================================================
+local AnalyticalMotion = {}
+local activeCount = 0
+local mapping = {}
+local cache_Instances, cache_Props, cache_Types, cache_Targets = {}, {}, {}, {}
+local cache_Positions, cache_Velocities, cache_Stiffness, cache_Damping = {}, {}, {}, {}
+local cache_Offsets, cache_Paused, cache_Callbacks = {}, {}, {}
+
+local function getDimension(tStr: string): number
+    if tStr == "number" or tStr == "Transparency" then return 1
+    elseif tStr == "Vector2" or tStr == "UDim" then return 2
+    elseif tStr == "Vector3" or tStr == "Color3" then return 3
+    elseif tStr == "UDim2" then return 4 end
+    return 1
+end
+
+local function pack(tStr: string, val: any, dest: {number}, start: number)
+    if tStr == "number" or tStr == "Transparency" then dest[start] = val
+    elseif tStr == "Vector2" then dest[start], dest[start+1] = val.X, val.Y
+    elseif tStr == "Vector3" then dest[start], dest[start+1], dest[start+2] = val.X, val.Y, val.Z
+    elseif tStr == "Color3" then dest[start], dest[start+1], dest[start+2] = val.R, val.G, val.B
+    elseif tStr == "UDim" then dest[start], dest[start+1] = val.Scale, val.Offset
+    elseif tStr == "UDim2" then
+        dest[start], dest[start+1] = val.X.Scale, val.X.Offset
+        dest[start+2], dest[start+3] = val.Y.Scale, val.Y.Offset
+    end
+end
+
+local function unpackData(tStr: string, src: {number}, start: number): any
+    if tStr == "number" or tStr == "Transparency" then return src[start]
+    elseif tStr == "Vector2" then return Vector2.new(src[start], src[start+1])
+    elseif tStr == "Vector3" then return Vector3.new(src[start], src[start+1], src[start+2])
+    elseif tStr == "Color3" then return Color3.new(math.clamp(src[start],0,1), math.clamp(src[start+1],0,1), math.clamp(src[start+2],0,1))
+    elseif tStr == "UDim" then return UDim.new(src[start], math.round(src[start+1]))
+    elseif tStr == "UDim2" then return UDim2.new(src[start], math.round(src[start+1]), src[start+2], math.round(src[start+3])) end
+    return 0
+end
+
+function AnalyticalMotion.Step(dt: number)
+    if dt > 0.05 then dt = 0.05 end
+    local i = 1
+    while i <= activeCount do
+        local inst = cache_Instances[i]
+        if not inst or not inst.Parent then
+            AnalyticalMotion._removeAt(i) continue
+        end
+        if cache_Paused[i] then i += 1 continue end
+        
+        local tStr = cache_Types[i]
+        local dim = getDimension(tStr)
+        local offset = cache_Offsets[i]
+        local k, c, done = cache_Stiffness[i], cache_Damping[i], true
+        
+        for d = 0, dim - 1 do
+            local pIdx = offset + d
+            local p, v, targ = cache_Positions[pIdx], cache_Velocities[pIdx], cache_Targets[pIdx]
+            local acc = (-k * (p - targ)) - (c * v)
+            v += acc * dt p += v * dt
+            if math.abs(v) < 0.0001 and math.abs(p - targ) < 0.0001 then p = targ v = 0 else done = false end
+            cache_Positions[pIdx] = p cache_Velocities[pIdx] = v
+        end
+        
+        local prop = cache_Props[i]
+        if tStr == "Transparency" then
+            pcall(function() inst.BackgroundTransparency = cache_Positions[offset] end)
+            pcall(function() inst.TextTransparency = cache_Positions[offset] end)
+        else
+            pcall(function() (inst :: any)[prop] = unpackData(tStr, cache_Positions, offset) end)
+        end
+        
+        if done then
+            local cb = cache_Callbacks[i] if cb then task.spawn(cb) end
+            AnalyticalMotion._removeAt(i)
+        else i += 1 end
+    end
+end
+
+function AnalyticalMotion.Link(inst: Instance, prop: string, target: any, stiffness: number?, damping: number?, cb: (() -> ())?)
+    local tStr = typeof(target)
+    if prop:find("Transparency") then tStr = "Transparency" end
+    if not mapping[inst] then mapping[inst] = {} end
+    local idx = mapping[inst][prop]
+    if not idx then
+        activeCount += 1 idx = activeCount mapping[inst][prop] = idx
+        cache_Instances[idx] = inst cache_Props[idx] = prop cache_Types[idx] = tStr
+        cache_Offsets[idx] = (idx == 1) and 1 or (cache_Offsets[idx-1] + getDimension(cache_Types[idx-1]))
+        cache_Paused[idx] = false
+        local cVal = (tStr == "Transparency") and ((inst :: any).BackgroundTransparency or 0) or (inst :: any)[prop]
+        pack(tStr, cVal or target, cache_Positions, cache_Offsets[idx])
+        for d = 0, getDimension(tStr) - 1 do cache_Velocities[cache_Offsets[idx]+d] = 0 end
+    end
+    cache_Stiffness[idx] = stiffness or 300 cache_Damping[idx] = damping or 20 cache_Callbacks[idx] = cb
+    pack(tStr, target, cache_Targets, cache_Offsets[idx])
+end
+
+function AnalyticalMotion._removeAt(idx: number)
+    local inst, prop = cache_Instances[idx], cache_Props[idx]
+    if mapping[inst] then mapping[inst][prop] = nil if next(mapping[inst]) == nil then mapping[inst] = nil end end
+    if idx == activeCount then
+        cache_Instances[idx] = nil cache_Props[idx] = nil cache_Callbacks[idx] = nil activeCount -= 1
+    else
+        cache_Instances[idx] = cache_Instances[activeCount] cache_Props[idx] = cache_Props[activeCount]
+        cache_Types[idx] = cache_Types[activeCount] cache_Stiffness[idx] = cache_Stiffness[activeCount]
+        cache_Damping[idx] = cache_Damping[activeCount] cache_Offsets[idx] = cache_Offsets[activeCount]
+        cache_Paused[idx] = cache_Paused[activeCount] cache_Callbacks[idx] = cache_Callbacks[activeCount]
+        if mapping[cache_Instances[idx]] then mapping[cache_Instances[idx]][cache_Props[idx]] = idx end
+        cache_Instances[activeCount] = nil cache_Props[activeCount] = nil cache_Callbacks[activeCount] = nil activeCount -= 1
+    end
+end
+
+game:GetService("RunService").Heartbeat:Connect(AnalyticalMotion.Step)
+
+-- =============================================================================
+-- [4] UTILITY: TOKENS & DYNAMIC THEME SYSTEM
+-- =============================================================================
+local TokenEngine = {}
+local _tokenRegistry = {}
+function TokenEngine.Register(name: string, val: any)
+    if _tokenRegistry[name] then _tokenRegistry[name]:Set(val) else _tokenRegistry[name] = StateGraph.CreateState(val) end
+end
+function TokenEngine.Get(name: string)
+    if not _tokenRegistry[name] then _tokenRegistry[name] = StateGraph.CreateState(false) end
+    return _tokenRegistry[name]
+end
+
+local ThemeEngine = {}
+local _themes = {
+    Dark = { Background = Color3.fromRGB(18, 18, 24), Surface = Color3.fromRGB(26, 26, 36), Border = Color3.fromRGB(45, 45, 55), Accent = Color3.fromRGB(0, 145, 255), Text = Color3.fromRGB(245, 245, 250), Muted = Color3.fromRGB(135, 135, 145), Font = Enum.Font.GothamMedium },
+    Light = { Background = Color3.fromRGB(240, 240, 245), Surface = Color3.fromRGB(255, 255, 255), Border = Color3.fromRGB(200, 200, 210), Accent = Color3.fromRGB(0, 120, 240), Text = Color3.fromRGB(20, 20, 30), Muted = Color3.fromRGB(110, 110, 120), Font = Enum.Font.GothamMedium }
+}
+function ThemeEngine.Apply(themeName: string)
+    local t = _themes[themeName] if not t then return end
+    StateGraph.Batch(function() for k, v in pairs(t) do TokenEngine.Register(k, v) end end)
+end
+ThemeEngine.Apply("Dark") -- Inicia no modo escuro de fábrica
+
+-- =============================================================================
+-- [5] COMPONENTS: BASE COMPONENT & WINDOW INFRASTRUCTURE
+-- =============================================================================
+local BaseComponent = {}
+BaseComponent.__index = BaseComponent
+function BaseComponent.new(className: string, tag: string)
+    local inst = Instance.new(className) :: any
+    inst.BorderSizePixel = 0
+    local self = setmetatable({ Id = 0, Instance = inst }, BaseComponent)
+    self.Id = Registry.GenerateId(self, tag)
+    return self
+end
+function BaseComponent:Destroy()
+    Registry.Destroy(self.Id)
+    if self.Instance then self.Instance:Destroy() end
+end
+
+-- WINDOW COMPONENT
+local Window = {} Window.__index = Window
+function Window.new(titleText: string)
+    local base = BaseComponent.new("ScreenGui", "KazeUI_Container")
+    base.Instance.ResetOnSpawn = false
+    base.Instance.Parent = game:GetService("CoreGui") rescue base.Instance.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+    
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 520, 0, 360)
+    frame.Position = UDim2.new(0.5, -260, 0.5, -180)
+    frame.BackgroundColor3 = TokenEngine.Get( "Background" ):Get()
+    frame.Active = true frame.Parent = base.Instance
+    
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 35)
+    titleBar.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    titleBar.Parent = frame
+    
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -20, 1, 0) titleLabel.Position = UDim2.new(0, 12, 0, 0)
+    titleLabel.BackgroundTransparency = 1 titleLabel.Text = titleText
+    titleLabel.TextColor3 = TokenEngine.Get("Text"):Get() titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Font = TokenEngine.Get("Font"):Get() titleLabel.TextSize = 14 titleLabel.Parent = titleBar
+    
+    local container = Instance.new("ScrollingFrame")
+    container.Size = UDim2.new(1, -20, 1, -55) container.Position = UDim2.new(0, 10, 0, 45)
+    container.BackgroundTransparency = 1 container.CanvasSize = UDim2.new(0, 0, 0, 0)
+    container.ScrollBarThickness = 3 container.ScrollBarImageColor3 = TokenEngine.Get("Muted"):Get()
+    container.Parent = frame
+    
+    -- Dragging Handler Integrado O(1)
+    local drag, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            drag = true dragStart = input.Position startPos = frame.Position
+            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then drag = false end end)
+        end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            AnalyticalMotion.Link(frame, "Position", UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y), 500, 28)
+        end
+    end)
+    
+    local self = setmetatable({ Base = base, Frame = frame, Container = container, LayoutOffset = 0 }, Window)
+    return self
+end
+
+function Window:AddOffset(offset: number)
+    self.LayoutOffset += offset
+    self.Container.CanvasSize = UDim2.new(0, 0, 0, self.LayoutOffset)
+end
+
+-- =============================================================================
+-- [6] COMPONENTES DE INTERAÇÃO (BUTTON, TOGGLE, SLIDER)
+-- =============================================================================
+function Window:Button(text: string, callback: () -> ())
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 32) btn.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
+    btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get() btn.Text = text
+    btn.TextColor3 = TokenEngine.Get("Text"):Get() btn.Font = TokenEngine.Get("Font"):Get()
+    btn.TextSize = 13 btn.Parent = self.Container
+    
+    btn.MouseEnter:Connect(function() AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Border"):Get(), 400, 20) end)
+    btn.MouseLeave:Connect(function() AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Surface"):Get(), 400, 20) end)
+    btn.MouseButton1Click:Connect(callback)
+    self:AddOffset(38)
+end
+
+function Window:Toggle(text: string, default: boolean, callback: (boolean) -> ())
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 30) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
+    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -45, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
+    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
+    
+    local box = Instance.new("TextButton")
+    box.Size = UDim2.new(0, 38, 0, 20) box.Position = UDim2.new(1, -38, 0.5, -10)
+    box.BackgroundColor3 = TokenEngine.Get("Surface"):Get() box.Text = "" box.Parent = frame
+    
+    local inner = Instance.new("Frame")
+    inner.Size = UDim2.new(0, 14, 0, 14) inner.Position = UDim2.new(0, 3, 0.5, -7)
+    inner.BackgroundColor3 = TokenEngine.Get("Muted"):Get() inner.BorderSizePixel = 0 inner.Parent = box
+    
+    local state = StateGraph.CreateState(default)
+    StateGraph.Observe(state, function(v)
+        local targetX = v and 21 or 3
+        local color = v and TokenEngine.Get("Accent"):Get() or TokenEngine.Get("Muted"):Get()
+        AnalyticalMotion.Link(inner, "Position", UDim2.new(0, targetX, 0.5, -7), 450, 24)
+        AnalyticalMotion.Link(inner, "BackgroundColor3", color, 450, 24)
+        task.spawn(callback, v)
+    end)
+    box.MouseButton1Click:Connect(function() state:Set(not state:Get()) end)
+    self:AddOffset(36)
+end
+
+function Window:Slider(text: string, min: number, max: number, default: number, callback: (number) -> ())
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 45) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
+    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.7, 0, 0, 20) lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
+    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
+    
+    local valLbl = Instance.new("TextLabel")
+    valLbl.Size = UDim2.new(0.3, 0, 0, 20) valLbl.Position = UDim2.new(0.7, 0, 0, 0)
+    valLbl.BackgroundTransparency = 1 valLbl.Text = tostring(default)
+    valLbl.TextColor3 = TokenEngine.Get("Muted"):Get() valLbl.Font = TokenEngine.Get("Font"):Get()
+    valLbl.TextSize = 13 valLbl.TextXAlignment = Enum.TextXAlignment.Right valLbl.Parent = frame
+    
+    local track = Instance.new("TextButton")
+    track.Size = UDim2.new(1, 0, 0, 6) track.Position = UDim2.new(0, 0, 0, 25)
+    track.BackgroundColor3 = TokenEngine.Get("Surface"):Get() track.Text = "" track.Parent = frame
+    
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new((default - min)/(max - min), 0, 1, 0)
+    fill.BackgroundColor3 = TokenEngine.Get("Accent"):Get() fill.BorderSizePixel = 0 fill.Parent = track
+    
+    local state = StateGraph.CreateState(default)
+    local drag = false
+    
+    local function snap(input: InputObject)
+        local w = track.AbsoluteSize.X if w == 0 then return end
+        local pct = math.clamp((input.Position.X - track.AbsolutePosition.X) / w, 0, 1)
+        local val = math.round((min + (pct * (max - min))) * 100) / 100
+        state:Set(val)
+    end
+    
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            drag = true snap(input)
+        end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            snap(input)
+        end
+    end)
+    game:GetService("UserInputService").InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then drag = false end
+    end)
+    
+    StateGraph.Observe(state, function(v)
+        valLbl.Text = tostring(v)
+        AnalyticalMotion.Link(fill, "Size", UDim2.new((v - min)/(max - min), 0, 1, 0), 400, 25)
+        task.spawn(callback, v)
+    end)
+    self:AddOffset(52)
+end
+
+-- =============================================================================
+-- EXPOSIÇÃO DA ENGINE COMPILADA
+-- =============================================================================
+KazeUI.CreateWindow = Window.new
+KazeUI.Theme = ThemeEngine.Apply
+
+return KazeUI
