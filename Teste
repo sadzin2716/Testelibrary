@@ -1,13 +1,13 @@
 --!strict
 -- =============================================================================
 -- KAZEUI ENTERPRISE v1.0.0 UNIFIED DISTRIBUTABLE
--- AUTOCONTIDO • COPIAR E COLAR NO GITHUB PARA USO VIA LOADSTRING
+-- 100% FUNCIONAL • COPIAR E COLAR NO GITHUB PARA USO COMPLETO VIA LOADSTRING
 -- =============================================================================
 
 local KazeUI = {}
 
 -- =============================================================================
--- [1] CORE: REGISTRY SYSTEM
+-- [1] CORE: REGISTRY & LIFECYCLE MANAGEMENT
 -- =============================================================================
 local Registry = {}
 local _idCounter = 0
@@ -133,20 +133,8 @@ function StateGraph.Observe(node: any, callback: (any) -> ()): () -> ()
     return function() node._observers[token] = nil end
 end
 
-function StateGraph.Batch(callback: () -> ())
-    StateGraph._batchDepth += 1
-    local ok, err = pcall(callback)
-    StateGraph._batchDepth -= 1
-    if StateGraph._batchDepth == 0 then
-        local q = StateGraph._batchQueue
-        StateGraph._batchQueue = setmetatable({}, { __mode = "k" })
-        for node, val in pairs(q) do node:Set(val) end
-    end
-    if not ok then error(err) end
-end
-
 -- =============================================================================
--- [3] CORE: ANALYTICAL MOTION ENGINE (FÍSICA ZERO ALOCAÇÃO NO HEARTBEAT)
+-- [3] CORE: ANALYTICAL MOTION ENGINE (FÍSICA DE AMORTECIMENTO CRÍTICO)
 -- =============================================================================
 local AnalyticalMotion = {}
 local activeCount = 0
@@ -190,9 +178,7 @@ function AnalyticalMotion.Step(dt: number)
     local i = 1
     while i <= activeCount do
         local inst = cache_Instances[i]
-        if not inst or not inst.Parent then
-            AnalyticalMotion._removeAt(i) continue
-        end
+        if not inst or not inst.Parent then AnalyticalMotion._removeAt(i) continue end
         if cache_Paused[i] then i += 1 continue end
         
         local tStr = cache_Types[i]
@@ -212,7 +198,7 @@ function AnalyticalMotion.Step(dt: number)
         local prop = cache_Props[i]
         if tStr == "Transparency" then
             pcall(function() inst.BackgroundTransparency = cache_Positions[offset] end)
-            pcall(function() inst.TextTransparency = cache_Positions[offset] end)
+            pcall(function() (inst :: any).TextTransparency = cache_Positions[offset] end)
         else
             pcall(function() (inst :: any)[prop] = unpackData(tStr, cache_Positions, offset) end)
         end
@@ -238,7 +224,7 @@ function AnalyticalMotion.Link(inst: Instance, prop: string, target: any, stiffn
         pack(tStr, cVal or target, cache_Positions, cache_Offsets[idx])
         for d = 0, getDimension(tStr) - 1 do cache_Velocities[cache_Offsets[idx]+d] = 0 end
     end
-    cache_Stiffness[idx] = stiffness or 300 cache_Damping[idx] = damping or 20 cache_Callbacks[idx] = cb
+    cache_Stiffness[idx] = stiffness or 300 cache_Damping[idx] = damping or 22 cache_Callbacks[idx] = cb
     pack(tStr, target, cache_Targets, cache_Offsets[idx])
 end
 
@@ -260,7 +246,7 @@ end
 game:GetService("RunService").Heartbeat:Connect(AnalyticalMotion.Step)
 
 -- =============================================================================
--- [4] UTILITY: TOKENS & DYNAMIC THEME SYSTEM
+-- [4] UTILITY: TOKENS & DESIGN THEMES
 -- =============================================================================
 local TokenEngine = {}
 local _tokenRegistry = {}
@@ -274,49 +260,47 @@ end
 
 local ThemeEngine = {}
 local _themes = {
-    Dark = { Background = Color3.fromRGB(18, 18, 24), Surface = Color3.fromRGB(26, 26, 36), Border = Color3.fromRGB(45, 45, 55), Accent = Color3.fromRGB(0, 145, 255), Text = Color3.fromRGB(245, 245, 250), Muted = Color3.fromRGB(135, 135, 145), Font = Enum.Font.GothamMedium },
+    Dark = { Background = Color3.fromRGB(20, 20, 26), Surface = Color3.fromRGB(28, 28, 38), Border = Color3.fromRGB(45, 45, 55), Accent = Color3.fromRGB(0, 145, 255), Text = Color3.fromRGB(245, 245, 250), Muted = Color3.fromRGB(135, 135, 145), Font = Enum.Font.GothamMedium },
     Light = { Background = Color3.fromRGB(240, 240, 245), Surface = Color3.fromRGB(255, 255, 255), Border = Color3.fromRGB(200, 200, 210), Accent = Color3.fromRGB(0, 120, 240), Text = Color3.fromRGB(20, 20, 30), Muted = Color3.fromRGB(110, 110, 120), Font = Enum.Font.GothamMedium }
 }
 function ThemeEngine.Apply(themeName: string)
     local t = _themes[themeName] if not t then return end
-    StateGraph.Batch(function() for k, v in pairs(t) do TokenEngine.Register(k, v) end end)
+    for k, v in pairs(t) do TokenEngine.Register(k, v) end
 end
-ThemeEngine.Apply("Dark") -- Inicia no modo escuro de fábrica
+ThemeEngine.Apply("Dark")
 
 -- =============================================================================
--- [5] COMPONENTS: BASE COMPONENT & WINDOW INFRASTRUCTURE
+-- [5] WINDOW FRAMEWORK & STRUCTURAL COMPONENTS
 -- =============================================================================
 local BaseComponent = {}
 BaseComponent.__index = BaseComponent
 function BaseComponent.new(className: string, tag: string)
     local inst = Instance.new(className) :: any
-    inst.BorderSizePixel = 0
+    if pcall(function() return inst.BorderSizePixel end) then inst.BorderSizePixel = 0 end
     local self = setmetatable({ Id = 0, Instance = inst }, BaseComponent)
     self.Id = Registry.GenerateId(self, tag)
     return self
 end
-function BaseComponent:Destroy()
-    Registry.Destroy(self.Id)
-    if self.Instance then self.Instance:Destroy() end
-end
 
--- WINDOW COMPONENT
+-- WINDOW SYSTEM
 local Window = {} Window.__index = Window
 function Window.new(titleText: string)
     local base = BaseComponent.new("ScreenGui", "KazeUI_Container")
     base.Instance.ResetOnSpawn = false
-    base.Instance.Parent = game:GetService("CoreGui") rescue base.Instance.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
+    
+    local success, _ = pcall(function() base.Instance.Parent = game:GetService("CoreGui") end)
+    if not success then base.Instance.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
     
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 520, 0, 360)
-    frame.Position = UDim2.new(0.5, -260, 0.5, -180)
-    frame.BackgroundColor3 = TokenEngine.Get( "Background" ):Get()
+    frame.Size = UDim2.new(0, 520, 0, 380)
+    frame.Position = UDim2.new(0.5, -260, 0.5, -190)
+    frame.BackgroundColor3 = TokenEngine.Get("Background"):Get()
     frame.Active = true frame.Parent = base.Instance
     
     local titleBar = Instance.new("Frame")
     titleBar.Size = UDim2.new(1, 0, 0, 35)
     titleBar.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
-    titleBar.Parent = frame
+    titleBar.BorderSizePixel = 0 titleBar.Parent = frame
     
     local titleLabel = Instance.new("TextLabel")
     titleLabel.Size = UDim2.new(1, -20, 1, 0) titleLabel.Position = UDim2.new(0, 12, 0, 0)
@@ -324,13 +308,16 @@ function Window.new(titleText: string)
     titleLabel.TextColor3 = TokenEngine.Get("Text"):Get() titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Font = TokenEngine.Get("Font"):Get() titleLabel.TextSize = 14 titleLabel.Parent = titleBar
     
-    local container = Instance.new("ScrollingFrame")
-    container.Size = UDim2.new(1, -20, 1, -55) container.Position = UDim2.new(0, 10, 0, 45)
-    container.BackgroundTransparency = 1 container.CanvasSize = UDim2.new(0, 0, 0, 0)
-    container.ScrollBarThickness = 3 container.ScrollBarImageColor3 = TokenEngine.Get("Muted"):Get()
-    container.Parent = frame
+    local tabBar = Instance.new("Frame")
+    tabBar.Size = UDim2.new(1, 0, 0, 30) tabBar.Position = UDim2.new(0, 0, 0, 35)
+    tabBar.BackgroundColor3 = TokenEngine.Get("Background"):Get()
+    tabBar.BorderSizePixel = 0 tabBar.Parent = frame
     
-    -- Dragging Handler Integrado O(1)
+    local pagesContainer = Instance.new("Frame")
+    pagesContainer.Size = UDim2.new(1, 0, 1, -65) pagesContainer.Position = UDim2.new(0, 0, 0, 65)
+    pagesContainer.BackgroundTransparency = 1 pagesContainer.Parent = frame
+    
+    -- Dragging Handler
     local drag, dragStart, startPos
     titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -341,23 +328,82 @@ function Window.new(titleText: string)
     game:GetService("UserInputService").InputChanged:Connect(function(input)
         if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - dragStart
-            AnalyticalMotion.Link(frame, "Position", UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y), 500, 28)
+            AnalyticalMotion.Link(frame, "Position", UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y), 550, 26)
         end
     end)
     
-    local self = setmetatable({ Base = base, Frame = frame, Container = container, LayoutOffset = 0 }, Window)
+    local self = setmetatable({
+        Base = base, Frame = frame, TabBar = tabBar, PagesContainer = pagesContainer,
+        Tabs = {}, TabOrder = {}, CurrentTab = StateGraph.CreateState("")
+    }, Window)
     return self
 end
 
-function Window:AddOffset(offset: number)
+-- PAGE ENGINE (TABS) WITH MOTOR DE LAYOUT INTERNO
+local Page = {} Page.__index = Page
+function Page.new(parentContainer: Instance)
+    local scroller = Instance.new("ScrollingFrame")
+    scroller.Size = UDim2.new(1, -20, 1, -20) scroller.Position = UDim2.new(0, 10, 0, 10)
+    scroller.BackgroundTransparency = 1 scroller.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroller.ScrollBarThickness = 3 scroller.ScrollBarImageColor3 = TokenEngine.Get("Muted"):Get()
+    scroller.Visible = false scroller.Parent = parentContainer
+    
+    return setmetatable({ Container = scroller, LayoutOffset = 0 }, Page)
+end
+
+function Page:AddOffset(offset: number)
     self.LayoutOffset += offset
     self.Container.CanvasSize = UDim2.new(0, 0, 0, self.LayoutOffset)
 end
 
+function Window:Tab(name: string)
+    local page = Page.new(self.PagesContainer)
+    self.Tabs[name] = page
+    table.insert(self.TabOrder, name)
+    
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 90, 1, -2) btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    btn.BorderSizePixel = 0 btn.Text = name btn.TextColor3 = TokenEngine.Get("Muted"):Get()
+    btn.Font = TokenEngine.Get("Font"):Get() btn.TextSize = 12 btn.Parent = self.TabBar
+    
+    -- Redesenhar guias horizontais ordenadas de forma manual
+    for idx, tName in ipairs(self.TabOrder) do
+        local tBtn = self.TabBar:GetChildren()[idx]
+        if tBtn and tBtn:IsA("GuiObject") then tBtn.Position = UDim2.new(0, (idx-1) * 92 + 5, 0, 2) end
+    end
+    
+    btn.MouseButton1Click:Connect(function() self:SelectTab(name) end)
+    if self.CurrentTab:Get() == "" then self:SelectTab(name) end
+    return page
+end
+
+function Window:SelectTab(name: string)
+    local old = self.CurrentTab:Get()
+    if old == name then return end
+    self.CurrentTab:Set(name)
+    
+    for tName, page in pairs(self.Tabs) do
+        page.Container.Visible = (tName == name)
+    end
+end
+
 -- =============================================================================
--- [6] COMPONENTES DE INTERAÇÃO (BUTTON, TOGGLE, SLIDER)
+-- [6] CONTROLES E ELEMENTOS INTERATIVOS AVANÇADOS (PRODUÇÃO ENTERPRISE)
 -- =============================================================================
-function Window:Button(text: string, callback: () -> ())
+
+function Page:Section(title: string)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 24) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
+    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = string.upper(title)
+    lbl.TextColor3 = TokenEngine.Get("Accent"):Get() lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 11 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
+    self:AddOffset(28)
+end
+
+function Page:Button(text: string, callback: () -> ())
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, 0, 0, 32) btn.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
     btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get() btn.Text = text
@@ -370,7 +416,7 @@ function Window:Button(text: string, callback: () -> ())
     self:AddOffset(38)
 end
 
-function Window:Toggle(text: string, default: boolean, callback: (boolean) -> ())
+function Page:Toggle(text: string, default: boolean, callback: (boolean) -> ())
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, 0, 0, 30) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
     frame.BackgroundTransparency = 1 frame.Parent = self.Container
@@ -392,15 +438,17 @@ function Window:Toggle(text: string, default: boolean, callback: (boolean) -> ()
     StateGraph.Observe(state, function(v)
         local targetX = v and 21 or 3
         local color = v and TokenEngine.Get("Accent"):Get() or TokenEngine.Get("Muted"):Get()
+        local boxColor = v and TokenEngine.Get("Border"):Get() or TokenEngine.Get("Surface"):Get()
         AnalyticalMotion.Link(inner, "Position", UDim2.new(0, targetX, 0.5, -7), 450, 24)
         AnalyticalMotion.Link(inner, "BackgroundColor3", color, 450, 24)
+        AnalyticalMotion.Link(box, "BackgroundColor3", boxColor, 450, 24)
         task.spawn(callback, v)
     end)
     box.MouseButton1Click:Connect(function() state:Set(not state:Get()) end)
     self:AddOffset(36)
 end
 
-function Window:Slider(text: string, min: number, max: number, default: number, callback: (number) -> ())
+function Page:Slider(text: string, min: number, max: number, default: number, callback: (number) -> ())
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, 0, 0, 45) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
     frame.BackgroundTransparency = 1 frame.Parent = self.Container
@@ -435,14 +483,10 @@ function Window:Slider(text: string, min: number, max: number, default: number, 
     end
     
     track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            drag = true snap(input)
-        end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then drag = true snap(input) end
     end)
     game:GetService("UserInputService").InputChanged:Connect(function(input)
-        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            snap(input)
-        end
+        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then snap(input) end
     end)
     game:GetService("UserInputService").InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then drag = false end
@@ -456,8 +500,104 @@ function Window:Slider(text: string, min: number, max: number, default: number, 
     self:AddOffset(52)
 end
 
+function Page:Textbox(text: string, placeholder: string, callback: (string) -> ())
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 34) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
+    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.4, 0, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
+    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
+    
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0.6, 0, 1, 0) box.Position = UDim2.new(0.4, 0, 0, 0)
+    box.BackgroundColor3 = TokenEngine.Get("Surface"):Get() box.Text = ""
+    box.PlaceholderText = placeholder box.PlaceholderColor3 = TokenEngine.Get("Muted"):Get()
+    box.TextColor3 = TokenEngine.Get("Text"):Get() box.Font = TokenEngine.Get("Font"):Get()
+    box.TextSize = 13 box.ClearTextOnFocus = false box.Parent = frame
+    
+    box.FocusLost:Connect(function(enterPressed)
+        task.spawn(callback, box.Text)
+    end)
+    self:AddOffset(40)
+end
+
+function Page:Dropdown(text: string, options: {string}, callback: (string) -> ())
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 32) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
+    frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get() frame.ClipsDescendants = false frame.Parent = self.Container
+    
+    local lbl = Instance.new("TextButton")
+    lbl.Size = UDim2.new(1, 0, 1, 0) lbl.BackgroundTransparency = 1
+    lbl.Text = text .. " : " .. (options[1] or "Nenhum") lbl.TextColor3 = TokenEngine.Get("Text"):Get()
+    lbl.Font = TokenEngine.Get("Font"):Get() lbl.TextSize = 13 lbl.Parent = frame
+    
+    local listFrame = Instance.new("Frame")
+    listFrame.Size = UDim2.new(1, 0, 0, 0) listFrame.Position = UDim2.new(0, 0, 1, 1)
+    listFrame.BackgroundColor3 = TokenEngine.Get("Surface"):Get() listFrame.BorderSizePixel = 1
+    listFrame.BorderColor3 = TokenEngine.Get("Border"):Get() listFrame.Visible = false
+    listFrame.ZIndex = 10 listFrame.Parent = frame
+    
+    local open = false
+    lbl.MouseButton1Click:Connect(function()
+        open = not open
+        listFrame.Visible = open
+        AnalyticalMotion.Link(listFrame, "Size", open and UDim2.new(1, 0, 0, #options * 26) or UDim2.new(1, 0, 0, 0), 450, 25)
+    end)
+    
+    for idx, opt in ipairs(options) do
+        local optBtn = Instance.new("TextButton")
+        optBtn.Size = UDim2.new(1, 0, 0, 25) optBtn.Position = UDim2.new(0, 0, 0, (idx-1) * 26)
+        optBtn.BackgroundColor3 = TokenEngine.Get("Surface"):Get() optBtn.BorderSizePixel = 0
+        optBtn.Text = opt optBtn.TextColor3 = TokenEngine.Get("Text"):Get()
+        optBtn.Font = TokenEngine.Get("Font"):Get() optBtn.TextSize = 12 optBtn.ZIndex = 11 optBtn.Parent = listFrame
+        
+        optBtn.MouseButton1Click:Connect(function()
+            lbl.Text = text .. " : " .. opt
+            open = false listFrame.Visible = false listFrame.Size = UDim2.new(1, 0, 0, 0)
+            task.spawn(callback, opt)
+        end)
+    end
+    self:AddOffset(38)
+end
+
+function Page:Keybind(text: string, default: Enum.KeyCode, callback: () -> ())
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 32) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
+    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -75, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
+    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
+    
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 70, 0, 24) btn.Position = UDim2.new(1, -70, 0.5, -12)
+    btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get() btn.Text = default.Name
+    btn.TextColor3 = TokenEngine.Get("Accent"):Get() btn.Font = TokenEngine.Get("Font"):Get()
+    btn.TextSize = 12 btn.Parent = frame
+    
+    local currentBind = default
+    local listening = false
+    
+    btn.MouseButton1Click:Connect(function()
+        listening = true btn.Text = "..."
+    end)
+    
+    game:GetService("UserInputService").InputBegan:Connect(function(input, processed)
+        if processed then return end
+        if listening and input.UserInputType == Enum.UserInputType.Keyboard then
+            currentBind = input.KeyCode listening = false btn.Text = currentBind.Name
+        elseif not listening and input.KeyCode == currentBind then
+            task.spawn(callback)
+        end
+    end)
+    self:AddOffset(38)
+end
+
 -- =============================================================================
--- EXPOSIÇÃO DA ENGINE COMPILADA
+-- EXPOSIÇÃO DA API INTERNA COMPILADA
 -- =============================================================================
 KazeUI.CreateWindow = Window.new
 KazeUI.Theme = ThemeEngine.Apply
