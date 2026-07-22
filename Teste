@@ -1,147 +1,53 @@
 --!strict
 -- =============================================================================
--- KAZEUI ENTERPRISE v1.0.0 UNIFIED DISTRIBUTABLE
--- 100% FUNCIONAL • COPIAR E COLAR NO GITHUB PARA USO COMPLETO VIA LOADSTRING
+-- KAZEUI MODERN EDITION v2.0.0 (WIND-STYLE DESIGN)
+-- CÓDIGO FONTE UNIFICADO • DESIGN MODERNO PREMIUM • 100% FUNCIONAL VIA LOADSTRING
 -- =============================================================================
 
 local KazeUI = {}
 
 -- =============================================================================
--- [1] CORE: REGISTRY & LIFECYCLE MANAGEMENT
+-- [1] CORE: STATE & ANIMATION ENGINE
 -- =============================================================================
-local Registry = {}
-local _idCounter = 0
-local _registry = setmetatable({}, { __mode = "v" })
-local _metadata = {}
-
-function Registry.GenerateId(component: any, tag: string): number
-    _idCounter += 1
-    local id = _idCounter
-    _registry[id] = component
-    _metadata[id] = { Tag = tag, CreatedAt = os.clock(), Cleanups = {} }
-    return id
-end
-
-function Registry.BindCleanup(id: number, cleanup: () -> ())
-    local meta = _metadata[id]
-    if meta then table.insert(meta.Cleanups, cleanup) else cleanup() end
-end
-
-function Registry.Destroy(id: number)
-    local meta = _metadata[id]
-    if meta then
-        for i = #meta.Cleanups, 1, -1 do
-            pcall(meta.Cleanups[i])
-        end
-        _metadata[id] = nil
-    end
-    _registry[id] = nil
-end
-
--- =============================================================================
--- [2] CORE: STATE GRAPH ENGINE (REATIVIDADE ATÔMICA SEM DIAMOND PROBLEM)
--- =============================================================================
-local StateGraph = { _activeContext = nil, _batchDepth = 0, _batchQueue = setmetatable({}, { __mode = "k" }), _evalStack = {} }
-
-local function sortTopological(node: any, sorted: {any}, visited: { [any]: boolean }, stack: { [any]: boolean })
-    if stack[node] then error("[KazeUI] Ciclo circular detectado no Grafo de Estados!") end
-    if visited[node] then return end
-    stack[node] = true
-    for dep in pairs(node._dependents) do sortTopological(dep, sorted, visited, stack) end
-    stack[node] = nil
-    visited[node] = true
-    table.insert(sorted, 1, node)
-end
+local StateGraph = {}
 
 function StateGraph.CreateState(initialValue: any)
     local self = setmetatable({}, { __mode = "v" }) :: any
     self._value = initialValue
-    self._dependents = setmetatable({}, { __mode = "k" })
-    self._dependencies = setmetatable({}, { __mode = "k" })
     self._observers = setmetatable({}, { __mode = "k" })
-    self._destroyed = false
     
-    function self:Get()
-        if self._destroyed then return self._value end
-        if StateGraph._activeContext then
-            StateGraph._activeContext._dependencies[self] = true
-            self._dependents[StateGraph._activeContext] = true
-        end
-        return self._value
-    end
+    function self:Get() return self._value end
     
     function self:Set(newValue: any)
-        if self._destroyed or self._value == newValue then return end
-        if StateGraph._batchDepth > 0 then StateGraph._batchQueue[self] = newValue return end
+        if self._value == newValue then return end
         self._value = newValue
-        local sorted = {}
-        sortTopological(self, sorted, {}, {})
-        for i = #sorted, 1, -1 do
-            local nextNode = sorted[i]
-            if nextNode._processor then
-                local ok, res = pcall(nextNode._processor)
-                if ok then nextNode._value = res end
-            end
-            for _, obs in pairs(nextNode._observers) do task.spawn(obs, nextNode._value) end
+        for _, obs in pairs(self._observers) do 
+            task.spawn(function()
+                local ok, err = pcall(obs, newValue)
+                if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+            end)
         end
-    end
-    
-    function self:Destroy()
-        self._destroyed = true
-        table.clear(self._dependents)
-        table.clear(self._dependencies)
-        table.clear(self._observers)
     end
     return self
 end
 
-function StateGraph.CreateComputed(processor: () -> any)
-    local self = setmetatable({}, { __mode = "v" }) :: any
-    self._dependents = setmetatable({}, { __mode = "k" })
-    self._dependencies = setmetatable({}, { __mode = "k" })
-    self._observers = setmetatable({}, { __mode = "k" })
-    self._processor = processor
-    self._destroyed = false
-    
-    table.insert(StateGraph._evalStack, StateGraph._activeContext)
-    StateGraph._activeContext = self
-    local ok, initVal = pcall(processor)
-    StateGraph._activeContext = table.remove(StateGraph._evalStack)
-    self._value = ok and initVal or nil
-    
-    function self:Get()
-        if self._destroyed then return self._value end
-        if StateGraph._activeContext then
-            StateGraph._activeContext._dependencies[self] = true
-            self._dependents[StateGraph._activeContext] = true
-        end
-        return self._value
-    end
-    function self:Set() error("[KazeUI] Computeds são somente leitura.") end
-    function self:Destroy()
-        self._destroyed = true
-        for dep in pairs(self._dependencies) do dep._dependents[self] = nil end
-        table.clear(self._dependents) table.clear(self._dependencies) table.clear(self._observers)
-    end
-    return self
-end
-
-function StateGraph.Observe(node: any, callback: (any) -> ()): () -> ()
+function StateGraph.Observe(node: any, callback: (any) -> ())
     local token = {}
     node._observers[token] = callback
-    callback(node._value)
+    task.spawn(function()
+        local ok, err = pcall(callback, node._value)
+        if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+    end)
     return function() node._observers[token] = nil end
 end
 
--- =============================================================================
--- [3] CORE: ANALYTICAL MOTION ENGINE (FÍSICA DE AMORTECIMENTO CRÍTICO)
--- =============================================================================
+-- MOTOR FÍSICO DE ANIMAÇÃO
 local AnalyticalMotion = {}
 local activeCount = 0
 local mapping = {}
 local cache_Instances, cache_Props, cache_Types, cache_Targets = {}, {}, {}, {}
 local cache_Positions, cache_Velocities, cache_Stiffness, cache_Damping = {}, {}, {}, {}
-local cache_Offsets, cache_Paused, cache_Callbacks = {}, {}, {}
+local cache_Offsets = {}
 
 local function getDimension(tStr: string): number
     if tStr == "number" or tStr == "Transparency" then return 1
@@ -168,8 +74,8 @@ local function unpackData(tStr: string, src: {number}, start: number): any
     elseif tStr == "Vector2" then return Vector2.new(src[start], src[start+1])
     elseif tStr == "Vector3" then return Vector3.new(src[start], src[start+1], src[start+2])
     elseif tStr == "Color3" then return Color3.new(math.clamp(src[start],0,1), math.clamp(src[start+1],0,1), math.clamp(src[start+2],0,1))
-    elseif tStr == "UDim" then return UDim.new(src[start], math.round(src[start+1]))
-    elseif tStr == "UDim2" then return UDim2.new(src[start], math.round(src[start+1]), src[start+2], math.round(src[start+3])) end
+    elseif tStr == "UDim" then return UDim.new(src[start], src[start+1])
+    elseif tStr == "UDim2" then return UDim2.new(src[start], src[start+1], src[start+2], src[start+3]) end
     return 0
 end
 
@@ -179,7 +85,6 @@ function AnalyticalMotion.Step(dt: number)
     while i <= activeCount do
         local inst = cache_Instances[i]
         if not inst or not inst.Parent then AnalyticalMotion._removeAt(i) continue end
-        if cache_Paused[i] then i += 1 continue end
         
         local tStr = cache_Types[i]
         local dim = getDimension(tStr)
@@ -198,19 +103,15 @@ function AnalyticalMotion.Step(dt: number)
         local prop = cache_Props[i]
         if tStr == "Transparency" then
             pcall(function() inst.BackgroundTransparency = cache_Positions[offset] end)
-            pcall(function() (inst :: any).TextTransparency = cache_Positions[offset] end)
         else
             pcall(function() (inst :: any)[prop] = unpackData(tStr, cache_Positions, offset) end)
         end
         
-        if done then
-            local cb = cache_Callbacks[i] if cb then task.spawn(cb) end
-            AnalyticalMotion._removeAt(i)
-        else i += 1 end
+        if done then AnalyticalMotion._removeAt(i) else i += 1 end
     end
 end
 
-function AnalyticalMotion.Link(inst: Instance, prop: string, target: any, stiffness: number?, damping: number?, cb: (() -> ())?)
+function AnalyticalMotion.Link(inst: Instance, prop: string, target: any, stiffness: number?, damping: number?)
     local tStr = typeof(target)
     if prop:find("Transparency") then tStr = "Transparency" end
     if not mapping[inst] then mapping[inst] = {} end
@@ -219,12 +120,11 @@ function AnalyticalMotion.Link(inst: Instance, prop: string, target: any, stiffn
         activeCount += 1 idx = activeCount mapping[inst][prop] = idx
         cache_Instances[idx] = inst cache_Props[idx] = prop cache_Types[idx] = tStr
         cache_Offsets[idx] = (idx == 1) and 1 or (cache_Offsets[idx-1] + getDimension(cache_Types[idx-1]))
-        cache_Paused[idx] = false
         local cVal = (tStr == "Transparency") and ((inst :: any).BackgroundTransparency or 0) or (inst :: any)[prop]
         pack(tStr, cVal or target, cache_Positions, cache_Offsets[idx])
         for d = 0, getDimension(tStr) - 1 do cache_Velocities[cache_Offsets[idx]+d] = 0 end
     end
-    cache_Stiffness[idx] = stiffness or 300 cache_Damping[idx] = damping or 22 cache_Callbacks[idx] = cb
+    cache_Stiffness[idx] = stiffness or 320 cache_Damping[idx] = damping or 24
     pack(tStr, target, cache_Targets, cache_Offsets[idx])
 end
 
@@ -232,27 +132,28 @@ function AnalyticalMotion._removeAt(idx: number)
     local inst, prop = cache_Instances[idx], cache_Props[idx]
     if mapping[inst] then mapping[inst][prop] = nil if next(mapping[inst]) == nil then mapping[inst] = nil end end
     if idx == activeCount then
-        cache_Instances[idx] = nil cache_Props[idx] = nil cache_Callbacks[idx] = nil activeCount -= 1
+        cache_Instances[idx] = nil cache_Props[idx] = nil activeCount -= 1
     else
         cache_Instances[idx] = cache_Instances[activeCount] cache_Props[idx] = cache_Props[activeCount]
         cache_Types[idx] = cache_Types[activeCount] cache_Stiffness[idx] = cache_Stiffness[activeCount]
         cache_Damping[idx] = cache_Damping[activeCount] cache_Offsets[idx] = cache_Offsets[activeCount]
-        cache_Paused[idx] = cache_Paused[activeCount] cache_Callbacks[idx] = cache_Callbacks[activeCount]
         if mapping[cache_Instances[idx]] then mapping[cache_Instances[idx]][cache_Props[idx]] = idx end
-        cache_Instances[activeCount] = nil cache_Props[activeCount] = nil cache_Callbacks[activeCount] = nil activeCount -= 1
+        cache_Instances[activeCount] = nil cache_Props[activeCount] = nil activeCount -= 1
     end
 end
 
 game:GetService("RunService").Heartbeat:Connect(AnalyticalMotion.Step)
 
 -- =============================================================================
--- [4] UTILITY: TOKENS & DESIGN THEMES
+-- [2] THEME TOKENS (PALETA WIND-STYLE)
 -- =============================================================================
 local TokenEngine = {}
 local _tokenRegistry = {}
+
 function TokenEngine.Register(name: string, val: any)
     if _tokenRegistry[name] then _tokenRegistry[name]:Set(val) else _tokenRegistry[name] = StateGraph.CreateState(val) end
 end
+
 function TokenEngine.Get(name: string)
     if not _tokenRegistry[name] then _tokenRegistry[name] = StateGraph.CreateState(false) end
     return _tokenRegistry[name]
@@ -260,9 +161,20 @@ end
 
 local ThemeEngine = {}
 local _themes = {
-    Dark = { Background = Color3.fromRGB(20, 20, 26), Surface = Color3.fromRGB(28, 28, 38), Border = Color3.fromRGB(45, 45, 55), Accent = Color3.fromRGB(0, 145, 255), Text = Color3.fromRGB(245, 245, 250), Muted = Color3.fromRGB(135, 135, 145), Font = Enum.Font.GothamMedium },
-    Light = { Background = Color3.fromRGB(240, 240, 245), Surface = Color3.fromRGB(255, 255, 255), Border = Color3.fromRGB(200, 200, 210), Accent = Color3.fromRGB(0, 120, 240), Text = Color3.fromRGB(20, 20, 30), Muted = Color3.fromRGB(110, 110, 120), Font = Enum.Font.GothamMedium }
+    Dark = { 
+        Background = Color3.fromRGB(11, 12, 16),
+        Sidebar = Color3.fromRGB(16, 18, 24),
+        Surface = Color3.fromRGB(20, 22, 30), 
+        Card = Color3.fromRGB(26, 29, 40),
+        Border = Color3.fromRGB(38, 42, 58), 
+        Accent = Color3.fromRGB(99, 102, 241), -- Indigo moderno
+        AccentGlow = Color3.fromRGB(129, 140, 248),
+        Text = Color3.fromRGB(243, 244, 246), 
+        Muted = Color3.fromRGB(148, 163, 184), 
+        Font = Enum.Font.GothamMedium 
+    }
 }
+
 function ThemeEngine.Apply(themeName: string)
     local t = _themes[themeName] if not t then return end
     for k, v in pairs(t) do TokenEngine.Register(k, v) end
@@ -270,56 +182,76 @@ end
 ThemeEngine.Apply("Dark")
 
 -- =============================================================================
--- [5] WINDOW FRAMEWORK & STRUCTURAL COMPONENTS
+-- [3] UI BUILDER FRAMEWORK (WINDOW & TABS)
 -- =============================================================================
-local BaseComponent = {}
-BaseComponent.__index = BaseComponent
-function BaseComponent.new(className: string, tag: string)
-    local inst = Instance.new(className) :: any
-    if pcall(function() return inst.BorderSizePixel end) then inst.BorderSizePixel = 0 end
-    local self = setmetatable({ Id = 0, Instance = inst }, BaseComponent)
-    self.Id = Registry.GenerateId(self, tag)
-    return self
-end
-
--- WINDOW SYSTEM
 local Window = {} Window.__index = Window
-function Window.new(titleText: string)
-    local base = BaseComponent.new("ScreenGui", "KazeUI_Container")
-    base.Instance.ResetOnSpawn = false
+
+function Window.new(titleText: string, subtitleText: string?)
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "KazeUI_WindEdition"
+    screenGui.ResetOnSpawn = false
     
-    local success, _ = pcall(function() base.Instance.Parent = game:GetService("CoreGui") end)
-    if not success then base.Instance.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
+    local success, _ = pcall(function() screenGui.Parent = game:GetService("CoreGui") end)
+    if not success then screenGui.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
     
+    -- Main Window Body
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 520, 0, 380)
-    frame.Position = UDim2.new(0.5, -260, 0.5, -190)
+    frame.Size = UDim2.new(0, 580, 0, 420)
+    frame.Position = UDim2.new(0.5, -290, 0.5, -210)
     frame.BackgroundColor3 = TokenEngine.Get("Background"):Get()
-    frame.Active = true frame.Parent = base.Instance
+    frame.ClipsDescendants = true frame.Active = true frame.Parent = screenGui
     
-    local titleBar = Instance.new("Frame")
-    titleBar.Size = UDim2.new(1, 0, 0, 35)
-    titleBar.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
-    titleBar.BorderSizePixel = 0 titleBar.Parent = frame
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 14) mainCorner.Parent = frame
     
-    local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.new(1, -20, 1, 0) titleLabel.Position = UDim2.new(0, 12, 0, 0)
-    titleLabel.BackgroundTransparency = 1 titleLabel.Text = titleText
-    titleLabel.TextColor3 = TokenEngine.Get("Text"):Get() titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-    titleLabel.Font = TokenEngine.Get("Font"):Get() titleLabel.TextSize = 14 titleLabel.Parent = titleBar
+    local mainStroke = Instance.new("UIStroke")
+    mainStroke.Color = TokenEngine.Get("Border"):Get() mainStroke.Thickness = 1 mainStroke.Parent = frame
     
-    local tabBar = Instance.new("Frame")
-    tabBar.Size = UDim2.new(1, 0, 0, 30) tabBar.Position = UDim2.new(0, 0, 0, 35)
-    tabBar.BackgroundColor3 = TokenEngine.Get("Background"):Get()
-    tabBar.BorderSizePixel = 0 tabBar.Parent = frame
+    -- Sidebar (Abas)
+    local sidebar = Instance.new("Frame")
+    sidebar.Size = UDim2.new(0, 160, 1, 0)
+    sidebar.BackgroundColor3 = TokenEngine.Get("Sidebar"):Get() sidebar.Parent = frame
     
+    local sidebarBorder = Instance.new("Frame")
+    sidebarBorder.Size = UDim2.new(0, 1, 1, 0) sidebarBorder.Position = UDim2.new(1, -1, 0, 0)
+    sidebarBorder.BackgroundColor3 = TokenEngine.Get("Border"):Get() sidebarBorder.BorderSizePixel = 0 sidebarBorder.Parent = sidebar
+    
+    -- Header / Title na Sidebar
+    local headerFrame = Instance.new("Frame")
+    headerFrame.Size = UDim2.new(1, 0, 0, 54) headerFrame.BackgroundTransparency = 1 headerFrame.Parent = sidebar
+    
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(1, -24, 0, 22) titleLbl.Position = UDim2.new(0, 14, 0, 12)
+    titleLbl.BackgroundTransparency = 1 titleLbl.Text = titleText
+    titleLbl.TextColor3 = TokenEngine.Get("Text"):Get() titleLbl.Font = Enum.Font.GothamBold
+    titleLbl.TextSize = 15 titleLbl.TextXAlignment = Enum.TextXAlignment.Left titleLbl.Parent = headerFrame
+    
+    local subLbl = Instance.new("TextLabel")
+    subLbl.Size = UDim2.new(1, -24, 0, 14) subLbl.Position = UDim2.new(0, 14, 0, 32)
+    subLbl.BackgroundTransparency = 1 subLbl.Text = subtitleText or "Wind Interface v2.0"
+    subLbl.TextColor3 = TokenEngine.Get("Muted"):Get() subLbl.Font = TokenEngine.Get("Font"):Get()
+    subLbl.TextSize = 10 subLbl.TextXAlignment = Enum.TextXAlignment.Left subLbl.Parent = headerFrame
+    
+    -- Layout da Sidebar
+    local tabContainer = Instance.new("ScrollingFrame")
+    tabContainer.Size = UDim2.new(1, 0, 1, -54) tabContainer.Position = UDim2.new(0, 0, 0, 54)
+    tabContainer.BackgroundTransparency = 1 tabContainer.CanvasSize = UDim2.new(0,0,0,0)
+    tabContainer.ScrollBarThickness = 0 tabContainer.Parent = sidebar
+    
+    local tabLayout = Instance.new("UIListLayout")
+    tabLayout.Padding = UDim.new(0, 4) tabLayout.SortOrder = Enum.SortOrder.LayoutOrder tabLayout.Parent = tabContainer
+    
+    local tabPadding = Instance.new("UIPadding")
+    tabPadding.PaddingLeft = UDim.new(0, 8) tabPadding.PaddingRight = UDim.new(0, 8) tabPadding.Parent = tabContainer
+    
+    -- Áreas de Conteúdo
     local pagesContainer = Instance.new("Frame")
-    pagesContainer.Size = UDim2.new(1, 0, 1, -65) pagesContainer.Position = UDim2.new(0, 0, 0, 65)
+    pagesContainer.Size = UDim2.new(1, -160, 1, 0) pagesContainer.Position = UDim2.new(0, 160, 0, 0)
     pagesContainer.BackgroundTransparency = 1 pagesContainer.Parent = frame
     
-    -- Dragging Handler
+    -- Arrasto Suave
     local drag, dragStart, startPos
-    titleBar.InputBegan:Connect(function(input)
+    headerFrame.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             drag = true dragStart = input.Position startPos = frame.Position
             input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then drag = false end end)
@@ -328,49 +260,68 @@ function Window.new(titleText: string)
     game:GetService("UserInputService").InputChanged:Connect(function(input)
         if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - dragStart
-            AnalyticalMotion.Link(frame, "Position", UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y), 550, 26)
+            AnalyticalMotion.Link(frame, "Position", UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y), 650, 26)
         end
     end)
     
     local self = setmetatable({
-        Base = base, Frame = frame, TabBar = tabBar, PagesContainer = pagesContainer,
-        Tabs = {}, TabOrder = {}, CurrentTab = StateGraph.CreateState("")
+        Base = screenGui, Frame = frame, TabContainer = tabContainer, PagesContainer = pagesContainer,
+        Tabs = {}, TabButtons = {}, CurrentTab = StateGraph.CreateState("")
     }, Window)
     return self
 end
 
--- PAGE ENGINE (TABS) WITH MOTOR DE LAYOUT INTERNO
+-- PAGE ENGINE (LAYOUT AUTOMÁTICO VIA UILISTLAYOUT)
 local Page = {} Page.__index = Page
+
 function Page.new(parentContainer: Instance)
     local scroller = Instance.new("ScrollingFrame")
-    scroller.Size = UDim2.new(1, -20, 1, -20) scroller.Position = UDim2.new(0, 10, 0, 10)
-    scroller.BackgroundTransparency = 1 scroller.CanvasSize = UDim2.new(0, 0, 0, 0)
-    scroller.ScrollBarThickness = 3 scroller.ScrollBarImageColor3 = TokenEngine.Get("Muted"):Get()
+    scroller.Size = UDim2.new(1, 0, 1, 0) scroller.BackgroundTransparency = 1
+    scroller.CanvasSize = UDim2.new(0, 0, 0, 0) scroller.ScrollBarThickness = 2
+    scroller.ScrollBarImageColor3 = TokenEngine.Get("Border"):Get()
     scroller.Visible = false scroller.Parent = parentContainer
     
-    return setmetatable({ Container = scroller, LayoutOffset = 0 }, Page)
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8) layout.SortOrder = Enum.SortOrder.LayoutOrder layout.Parent = scroller
+    
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 16) padding.PaddingBottom = UDim.new(0, 16)
+    padding.PaddingLeft = UDim.new(0, 16) padding.PaddingRight = UDim.new(0, 16) padding.Parent = scroller
+    
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scroller.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 32)
+    end)
+    
+    return setmetatable({ Container = scroller }, Page)
 end
 
-function Page:AddOffset(offset: number)
-    self.LayoutOffset += offset
-    self.Container.CanvasSize = UDim2.new(0, 0, 0, self.LayoutOffset)
-end
-
-function Window:Tab(name: string)
+function Window:Tab(name: string, iconId: string?)
     local page = Page.new(self.PagesContainer)
     self.Tabs[name] = page
-    table.insert(self.TabOrder, name)
     
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 90, 1, -2) btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
-    btn.BorderSizePixel = 0 btn.Text = name btn.TextColor3 = TokenEngine.Get("Muted"):Get()
-    btn.Font = TokenEngine.Get("Font"):Get() btn.TextSize = 12 btn.Parent = self.TabBar
+    btn.Size = UDim2.new(1, 0, 0, 34) btn.BackgroundColor3 = TokenEngine.Get("Sidebar"):Get()
+    btn.Text = "" btn.AutoButtonColor = false btn.Parent = self.TabContainer
     
-    -- Redesenhar guias horizontais ordenadas de forma manual
-    for idx, tName in ipairs(self.TabOrder) do
-        local tBtn = self.TabBar:GetChildren()[idx]
-        if tBtn and tBtn:IsA("GuiObject") then tBtn.Position = UDim2.new(0, (idx-1) * 92 + 5, 0, 2) end
-    end
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 8) btnCorner.Parent = btn
+    
+    -- Indicador Lateral Ativo
+    local indicator = Instance.new("Frame")
+    indicator.Size = UDim2.new(0, 3, 0, 16) indicator.Position = UDim2.new(0, 2, 0.5, -8)
+    indicator.BackgroundColor3 = TokenEngine.Get("Accent"):Get()
+    indicator.BackgroundTransparency = 1 indicator.Parent = btn
+    
+    local indCorner = Instance.new("UICorner")
+    indCorner.CornerRadius = UDim.new(1, 0) indCorner.Parent = indicator
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -20, 1, 0) lbl.Position = UDim2.new(0, 14, 0, 0)
+    lbl.BackgroundTransparency = 1 lbl.Text = name
+    lbl.TextColor3 = TokenEngine.Get("Muted"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
+    lbl.TextSize = 12 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = btn
+    
+    self.TabButtons[name] = { Button = btn, Label = lbl, Indicator = indicator }
     
     btn.MouseButton1Click:Connect(function() self:SelectTab(name) end)
     if self.CurrentTab:Get() == "" then self:SelectTab(name) end
@@ -383,94 +334,148 @@ function Window:SelectTab(name: string)
     self.CurrentTab:Set(name)
     
     for tName, page in pairs(self.Tabs) do
-        page.Container.Visible = (tName == name)
+        local isTarget = (tName == name)
+        page.Container.Visible = isTarget
+        
+        local tabObj = self.TabButtons[tName]
+        if tabObj then
+            local targetBg = isTarget and TokenEngine.Get("Surface"):Get() or TokenEngine.Get("Sidebar"):Get()
+            local targetText = isTarget and TokenEngine.Get("Text"):Get() or TokenEngine.Get("Muted"):Get()
+            local targetIndTrans = isTarget and 0 or 1
+            
+            AnalyticalMotion.Link(tabObj.Button, "BackgroundColor3", targetBg, 400, 22)
+            AnalyticalMotion.Link(tabObj.Label, "TextColor3", targetText, 400, 22)
+            AnalyticalMotion.Link(tabObj.Indicator, "BackgroundTransparency", targetIndTrans, 400, 22)
+        end
     end
 end
 
 -- =============================================================================
--- [6] CONTROLES E ELEMENTOS INTERATIVOS AVANÇADOS (PRODUÇÃO ENTERPRISE)
+-- [4] COMPONENTES MODERNOS (ESTILIZAÇÃO WIND)
 -- =============================================================================
 
 function Page:Section(title: string)
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 24) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
-    frame.BackgroundTransparency = 1 frame.Parent = self.Container
-    
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, 0, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = string.upper(title)
-    lbl.TextColor3 = TokenEngine.Get("Accent"):Get() lbl.Font = Enum.Font.GothamBold
-    lbl.TextSize = 11 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
-    self:AddOffset(28)
+    lbl.Size = UDim2.new(1, 0, 0, 20) lbl.BackgroundTransparency = 1
+    lbl.Text = title lbl.TextColor3 = TokenEngine.Get("Muted"):Get()
+    lbl.Font = Enum.Font.GothamBold lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = self.Container
 end
 
 function Page:Button(text: string, callback: () -> ())
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 32) btn.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
-    btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get() btn.Text = text
-    btn.TextColor3 = TokenEngine.Get("Text"):Get() btn.Font = TokenEngine.Get("Font"):Get()
-    btn.TextSize = 13 btn.Parent = self.Container
+    btn.Size = UDim2.new(1, 0, 0, 36) btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    btn.Text = text btn.TextColor3 = TokenEngine.Get("Text"):Get()
+    btn.Font = TokenEngine.Get("Font"):Get() btn.TextSize = 13
+    btn.AutoButtonColor = false btn.Parent = self.Container
     
-    btn.MouseEnter:Connect(function() AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Border"):Get(), 400, 20) end)
-    btn.MouseLeave:Connect(function() AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Surface"):Get(), 400, 20) end)
-    btn.MouseButton1Click:Connect(callback)
-    self:AddOffset(38)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8) corner.Parent = btn
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = btn
+    
+    btn.MouseEnter:Connect(function() 
+        AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Card"):Get(), 400, 20) 
+    end)
+    btn.MouseLeave:Connect(function() 
+        AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Surface"):Get(), 400, 20) 
+    end)
+    
+    btn.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            local ok, err = pcall(callback)
+            if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+        end)
+    end)
 end
 
 function Page:Toggle(text: string, default: boolean, callback: (boolean) -> ())
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 30) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
-    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    frame.Size = UDim2.new(1, 0, 0, 40) frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    frame.Parent = self.Container
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8) corner.Parent = frame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = frame
     
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -45, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.Size = UDim2.new(1, -60, 1, 0) lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1 lbl.Text = text
     lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
     lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
     
     local box = Instance.new("TextButton")
-    box.Size = UDim2.new(0, 38, 0, 20) box.Position = UDim2.new(1, -38, 0.5, -10)
-    box.BackgroundColor3 = TokenEngine.Get("Surface"):Get() box.Text = "" box.Parent = frame
+    box.Size = UDim2.new(0, 38, 0, 22) box.Position = UDim2.new(1, -50, 0.5, -11)
+    box.BackgroundColor3 = TokenEngine.Get("Card"):Get() box.Text = "" box.AutoButtonColor = false box.Parent = frame
+    
+    local boxCorner = Instance.new("UICorner")
+    boxCorner.CornerRadius = UDim.new(1, 0) boxCorner.Parent = box
     
     local inner = Instance.new("Frame")
-    inner.Size = UDim2.new(0, 14, 0, 14) inner.Position = UDim2.new(0, 3, 0.5, -7)
-    inner.BackgroundColor3 = TokenEngine.Get("Muted"):Get() inner.BorderSizePixel = 0 inner.Parent = box
+    inner.Size = UDim2.new(0, 16, 0, 16) inner.Position = UDim2.new(0, 3, 0.5, -8)
+    inner.BackgroundColor3 = TokenEngine.Get("Muted"):Get() inner.Parent = box
+    
+    local innerCorner = Instance.new("UICorner")
+    innerCorner.CornerRadius = UDim.new(1, 0) innerCorner.Parent = inner
     
     local state = StateGraph.CreateState(default)
     StateGraph.Observe(state, function(v)
-        local targetX = v and 21 or 3
-        local color = v and TokenEngine.Get("Accent"):Get() or TokenEngine.Get("Muted"):Get()
-        local boxColor = v and TokenEngine.Get("Border"):Get() or TokenEngine.Get("Surface"):Get()
-        AnalyticalMotion.Link(inner, "Position", UDim2.new(0, targetX, 0.5, -7), 450, 24)
+        local targetX = v and 19 or 3
+        local color = v and Color3.fromRGB(255, 255, 255) or TokenEngine.Get("Muted"):Get()
+        local boxColor = v and TokenEngine.Get("Accent"):Get() or TokenEngine.Get("Card"):Get()
+        
+        AnalyticalMotion.Link(inner, "Position", UDim2.new(0, targetX, 0.5, -8), 450, 24)
         AnalyticalMotion.Link(inner, "BackgroundColor3", color, 450, 24)
         AnalyticalMotion.Link(box, "BackgroundColor3", boxColor, 450, 24)
-        task.spawn(callback, v)
+        
+        task.spawn(function()
+            local ok, err = pcall(callback, v)
+            if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+        end)
     end)
+    
     box.MouseButton1Click:Connect(function() state:Set(not state:Get()) end)
-    self:AddOffset(36)
 end
 
 function Page:Slider(text: string, min: number, max: number, default: number, callback: (number) -> ())
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 45) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
-    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    frame.Size = UDim2.new(1, 0, 0, 52) frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    frame.Parent = self.Container
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8) corner.Parent = frame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = frame
     
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0.7, 0, 0, 20) lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.Size = UDim2.new(0.7, 0, 0, 22) lbl.Position = UDim2.new(0, 12, 0, 6)
+    lbl.BackgroundTransparency = 1 lbl.Text = text
     lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
     lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
     
     local valLbl = Instance.new("TextLabel")
-    valLbl.Size = UDim2.new(0.3, 0, 0, 20) valLbl.Position = UDim2.new(0.7, 0, 0, 0)
+    valLbl.Size = UDim2.new(0.3, -12, 0, 22) valLbl.Position = UDim2.new(0.7, 0, 0, 6)
     valLbl.BackgroundTransparency = 1 valLbl.Text = tostring(default)
-    valLbl.TextColor3 = TokenEngine.Get("Muted"):Get() valLbl.Font = TokenEngine.Get("Font"):Get()
+    valLbl.TextColor3 = TokenEngine.Get("AccentGlow"):Get() valLbl.Font = Enum.Font.GothamBold
     valLbl.TextSize = 13 valLbl.TextXAlignment = Enum.TextXAlignment.Right valLbl.Parent = frame
     
     local track = Instance.new("TextButton")
-    track.Size = UDim2.new(1, 0, 0, 6) track.Position = UDim2.new(0, 0, 0, 25)
-    track.BackgroundColor3 = TokenEngine.Get("Surface"):Get() track.Text = "" track.Parent = frame
+    track.Size = UDim2.new(1, -24, 0, 5) track.Position = UDim2.new(0, 12, 0, 36)
+    track.BackgroundColor3 = TokenEngine.Get("Card"):Get() track.Text = "" track.AutoButtonColor = false track.Parent = frame
+    
+    local trackCorner = Instance.new("UICorner")
+    trackCorner.CornerRadius = UDim.new(1, 0) trackCorner.Parent = track
     
     local fill = Instance.new("Frame")
     fill.Size = UDim2.new((default - min)/(max - min), 0, 1, 0)
-    fill.BackgroundColor3 = TokenEngine.Get("Accent"):Get() fill.BorderSizePixel = 0 fill.Parent = track
+    fill.BackgroundColor3 = TokenEngine.Get("Accent"):Get() fill.Parent = track
+    
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(1, 0) fillCorner.Parent = fill
     
     local state = StateGraph.CreateState(default)
     local drag = false
@@ -478,7 +483,7 @@ function Page:Slider(text: string, min: number, max: number, default: number, ca
     local function snap(input: InputObject)
         local w = track.AbsoluteSize.X if w == 0 then return end
         local pct = math.clamp((input.Position.X - track.AbsolutePosition.X) / w, 0, 1)
-        local val = math.round((min + (pct * (max - min))) * 100) / 100
+        local val = math.round((min + (pct * (max - min))) * 10) / 10
         state:Set(val)
     end
     
@@ -495,110 +500,166 @@ function Page:Slider(text: string, min: number, max: number, default: number, ca
     StateGraph.Observe(state, function(v)
         valLbl.Text = tostring(v)
         AnalyticalMotion.Link(fill, "Size", UDim2.new((v - min)/(max - min), 0, 1, 0), 400, 25)
-        task.spawn(callback, v)
+        
+        task.spawn(function()
+            local ok, err = pcall(callback, v)
+            if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+        end)
     end)
-    self:AddOffset(52)
-end
-
-function Page:Textbox(text: string, placeholder: string, callback: (string) -> ())
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 34) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
-    frame.BackgroundTransparency = 1 frame.Parent = self.Container
-    
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0.4, 0, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = text
-    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
-    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
-    
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.new(0.6, 0, 1, 0) box.Position = UDim2.new(0.4, 0, 0, 0)
-    box.BackgroundColor3 = TokenEngine.Get("Surface"):Get() box.Text = ""
-    box.PlaceholderText = placeholder box.PlaceholderColor3 = TokenEngine.Get("Muted"):Get()
-    box.TextColor3 = TokenEngine.Get("Text"):Get() box.Font = TokenEngine.Get("Font"):Get()
-    box.TextSize = 13 box.ClearTextOnFocus = false box.Parent = frame
-    
-    box.FocusLost:Connect(function(enterPressed)
-        task.spawn(callback, box.Text)
-    end)
-    self:AddOffset(40)
 end
 
 function Page:Dropdown(text: string, options: {string}, callback: (string) -> ())
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 32) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
-    frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get() frame.ClipsDescendants = false frame.Parent = self.Container
+    frame.Size = UDim2.new(1, 0, 0, 40) frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    frame.ClipsDescendants = false frame.Parent = self.Container
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8) corner.Parent = frame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = frame
     
     local lbl = Instance.new("TextButton")
-    lbl.Size = UDim2.new(1, 0, 1, 0) lbl.BackgroundTransparency = 1
-    lbl.Text = text .. " : " .. (options[1] or "Nenhum") lbl.TextColor3 = TokenEngine.Get("Text"):Get()
-    lbl.Font = TokenEngine.Get("Font"):Get() lbl.TextSize = 13 lbl.Parent = frame
+    lbl.Size = UDim2.new(1, -24, 1, 0) lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1 lbl.Text = text .. " :  " .. (options[1] or "Nenhum")
+    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
+    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
     
     local listFrame = Instance.new("Frame")
-    listFrame.Size = UDim2.new(1, 0, 0, 0) listFrame.Position = UDim2.new(0, 0, 1, 1)
-    listFrame.BackgroundColor3 = TokenEngine.Get("Surface"):Get() listFrame.BorderSizePixel = 1
-    listFrame.BorderColor3 = TokenEngine.Get("Border"):Get() listFrame.Visible = false
-    listFrame.ZIndex = 10 listFrame.Parent = frame
+    listFrame.Size = UDim2.new(1, 0, 0, 0) listFrame.Position = UDim2.new(0, 0, 1, 4)
+    listFrame.BackgroundColor3 = TokenEngine.Get("Surface"):Get() listFrame.ClipsDescendants = true
+    listFrame.Visible = false listFrame.ZIndex = 100 listFrame.Parent = frame
+    
+    local listCorner = Instance.new("UICorner")
+    listCorner.CornerRadius = UDim.new(0, 8) listCorner.Parent = listFrame
+    
+    local listStroke = Instance.new("UIStroke")
+    listStroke.Color = TokenEngine.Get("Border"):Get() listStroke.Thickness = 1 listStroke.Parent = listFrame
+    
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 2) listLayout.Parent = listFrame
+    
+    local listPadding = Instance.new("UIPadding")
+    listPadding.PaddingTop = UDim.new(0, 4) listPadding.PaddingBottom = UDim.new(0, 4)
+    listPadding.PaddingLeft = UDim.new(0, 4) listPadding.PaddingRight = UDim.new(0, 4) listPadding.Parent = listFrame
     
     local open = false
     lbl.MouseButton1Click:Connect(function()
         open = not open
         listFrame.Visible = open
-        AnalyticalMotion.Link(listFrame, "Size", open and UDim2.new(1, 0, 0, #options * 26) or UDim2.new(1, 0, 0, 0), 450, 25)
+        AnalyticalMotion.Link(listFrame, "Size", open and UDim2.new(1, 0, 0, #options * 28 + 8) or UDim2.new(1, 0, 0, 0), 450, 25)
     end)
     
-    for idx, opt in ipairs(options) do
+    for _, opt in ipairs(options) do
         local optBtn = Instance.new("TextButton")
-        optBtn.Size = UDim2.new(1, 0, 0, 25) optBtn.Position = UDim2.new(0, 0, 0, (idx-1) * 26)
-        optBtn.BackgroundColor3 = TokenEngine.Get("Surface"):Get() optBtn.BorderSizePixel = 0
-        optBtn.Text = opt optBtn.TextColor3 = TokenEngine.Get("Text"):Get()
-        optBtn.Font = TokenEngine.Get("Font"):Get() optBtn.TextSize = 12 optBtn.ZIndex = 11 optBtn.Parent = listFrame
+        optBtn.Size = UDim2.new(1, 0, 0, 26) optBtn.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+        optBtn.Text = opt optBtn.TextColor3 = TokenEngine.Get("Muted"):Get()
+        optBtn.Font = TokenEngine.Get("Font"):Get() optBtn.TextSize = 12 optBtn.ZIndex = 101 optBtn.Parent = listFrame
+        
+        local optCorner = Instance.new("UICorner")
+        optCorner.CornerRadius = UDim.new(0, 6) optCorner.Parent = optBtn
+        
+        optBtn.MouseEnter:Connect(function() 
+            AnalyticalMotion.Link(optBtn, "BackgroundColor3", TokenEngine.Get("Card"):Get(), 300, 20)
+            AnalyticalMotion.Link(optBtn, "TextColor3", TokenEngine.Get("Text"):Get(), 300, 20) 
+        end)
+        optBtn.MouseLeave:Connect(function() 
+            AnalyticalMotion.Link(optBtn, "BackgroundColor3", TokenEngine.Get("Surface"):Get(), 300, 20)
+            AnalyticalMotion.Link(optBtn, "TextColor3", TokenEngine.Get("Muted"):Get(), 300, 20) 
+        end)
         
         optBtn.MouseButton1Click:Connect(function()
-            lbl.Text = text .. " : " .. opt
+            lbl.Text = text .. " :  " .. opt
             open = false listFrame.Visible = false listFrame.Size = UDim2.new(1, 0, 0, 0)
-            task.spawn(callback, opt)
+            
+            task.spawn(function()
+                local ok, err = pcall(callback, opt)
+                if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+            end)
         end)
     end
-    self:AddOffset(38)
+end
+
+function Page:Textbox(text: string, placeholder: string, callback: (string) -> ())
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 0, 40) frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    frame.Parent = self.Container
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8) corner.Parent = frame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = frame
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.4, -12, 1, 0) lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
+    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
+    
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0.6, -12, 0, 26) box.Position = UDim2.new(0.4, 0, 0.5, -13)
+    box.BackgroundColor3 = TokenEngine.Get("Card"):Get() box.Text = ""
+    box.PlaceholderText = placeholder box.PlaceholderColor3 = TokenEngine.Get("Muted"):Get()
+    box.TextColor3 = TokenEngine.Get("Text"):Get() box.Font = TokenEngine.Get("Font"):Get()
+    box.TextSize = 12 box.ClearTextOnFocus = false box.Parent = frame
+    
+    local boxCorner = Instance.new("UICorner")
+    boxCorner.CornerRadius = UDim.new(0, 6) boxCorner.Parent = box
+    
+    box.FocusLost:Connect(function() 
+        task.spawn(function()
+            local ok, err = pcall(callback, box.Text)
+            if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+        end)
+    end)
 end
 
 function Page:Keybind(text: string, default: Enum.KeyCode, callback: () -> ())
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 32) frame.Position = UDim2.new(0, 0, 0, self.LayoutOffset)
-    frame.BackgroundTransparency = 1 frame.Parent = self.Container
+    frame.Size = UDim2.new(1, 0, 0, 40) frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
+    frame.Parent = self.Container
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8) corner.Parent = frame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = frame
     
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -75, 1, 0) lbl.BackgroundTransparency = 1 lbl.Text = text
+    lbl.Size = UDim2.new(1, -110, 1, 0) lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1 lbl.Text = text
     lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
     lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
     
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 70, 0, 24) btn.Position = UDim2.new(1, -70, 0.5, -12)
-    btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get() btn.Text = default.Name
-    btn.TextColor3 = TokenEngine.Get("Accent"):Get() btn.Font = TokenEngine.Get("Font"):Get()
-    btn.TextSize = 12 btn.Parent = frame
+    btn.Size = UDim2.new(0, 86, 0, 26) btn.Position = UDim2.new(1, -98, 0.5, -13)
+    btn.BackgroundColor3 = TokenEngine.Get("Card"):Get() btn.Text = default.Name
+    btn.TextColor3 = TokenEngine.Get("AccentGlow"):Get() btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11 btn.AutoButtonColor = false btn.Parent = frame
+    
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 6) btnCorner.Parent = btn
     
     local currentBind = default
     local listening = false
     
-    btn.MouseButton1Click:Connect(function()
-        listening = true btn.Text = "..."
-    end)
+    btn.MouseButton1Click:Connect(function() listening = true btn.Text = "..." end)
     
     game:GetService("UserInputService").InputBegan:Connect(function(input, processed)
         if processed then return end
         if listening and input.UserInputType == Enum.UserInputType.Keyboard then
             currentBind = input.KeyCode listening = false btn.Text = currentBind.Name
         elseif not listening and input.KeyCode == currentBind then
-            task.spawn(callback)
+            task.spawn(function()
+                local ok, err = pcall(callback)
+                if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
+            end)
         end
     end)
-    self:AddOffset(38)
 end
 
--- =============================================================================
--- EXPOSIÇÃO DA API INTERNA COMPILADA
--- =============================================================================
+-- EXPOSIÇÃO DA ENGINE
 KazeUI.CreateWindow = Window.new
 KazeUI.Theme = ThemeEngine.Apply
 
