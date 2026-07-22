@@ -1,499 +1,777 @@
---!strict
--- =============================================================================
--- KAZEUI WIND EDITION (CÓDIGO COMPLETO UNIFICADO - EXECUÇÃO DIRETA)
--- =============================================================================
+-- [[ MUZYSH UI LIBRARY - PREMIUM & MODERN USER INTERFACE ]]
+-- Desenvolvida em Luau com foco em Mobile-First, Performance e Modularidade.
 
-local KazeUI = {}
+local Muzysh = {}
+Muzysh.__index = Muzysh
 
--- [1] CORE: STATE & ANIMATION ENGINE
-local StateGraph = {}
+-- [[ SERVIÇOS DO ROBLOX ]]
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local Players = game:GetService("Players")
 
-function StateGraph.CreateState(initialValue: any)
-    local self = setmetatable({}, { __mode = "v" }) :: any
-    self._value = initialValue
-    self._observers = setmetatable({}, { __mode = "k" })
-    
-    function self:Get() return self._value end
-    
-    function self:Set(newValue: any)
-        if self._value == newValue then return end
-        self._value = newValue
-        for _, obs in pairs(self._observers) do 
-            task.spawn(function()
-                local ok, err = pcall(obs, newValue)
-                if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
-            end)
-        end
-    end
-    return self
-end
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-function StateGraph.Observe(node: any, callback: (any) -> ())
-    local token = {}
-    node._observers[token] = callback
-    task.spawn(function()
-        local ok, err = pcall(callback, node._value)
-        if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
-    end)
-    return function() node._observers[token] = nil end
-end
-
-local AnalyticalMotion = {}
-local activeCount = 0
-local mapping = {}
-local cache_Instances, cache_Props, cache_Types, cache_Targets = {}, {}, {}, {}
-local cache_Positions, cache_Velocities, cache_Stiffness, cache_Damping = {}, {}, {}, {}
-local cache_Offsets = {}
-
-local function getDimension(tStr: string): number
-    if tStr == "number" or tStr == "Transparency" then return 1
-    elseif tStr == "Vector2" or tStr == "UDim" then return 2
-    elseif tStr == "Vector3" or tStr == "Color3" then return 3
-    elseif tStr == "UDim2" then return 4 end
-    return 1
-end
-
-local function pack(tStr: string, val: any, dest: {number}, start: number)
-    if tStr == "number" or tStr == "Transparency" then dest[start] = val
-    elseif tStr == "Vector2" then dest[start], dest[start+1] = val.X, val.Y
-    elseif tStr == "Vector3" then dest[start], dest[start+1], dest[start+2] = val.X, val.Y, val.Z
-    elseif tStr == "Color3" then dest[start], dest[start+1], dest[start+2] = val.R, val.G, val.B
-    elseif tStr == "UDim" then dest[start], dest[start+1] = val.Scale, val.Offset
-    elseif tStr == "UDim2" then
-        dest[start], dest[start+1] = val.X.Scale, val.X.Offset
-        dest[start+2], dest[start+3] = val.Y.Scale, val.Y.Offset
-    end
-end
-
-local function unpackData(tStr: string, src: {number}, start: number): any
-    if tStr == "number" or tStr == "Transparency" then return src[start]
-    elseif tStr == "Vector2" then return Vector2.new(src[start], src[start+1])
-    elseif tStr == "Vector3" then return Vector3.new(src[start], src[start+1], src[start+2])
-    elseif tStr == "Color3" then return Color3.new(math.clamp(src[start],0,1), math.clamp(src[start+1],0,1), math.clamp(src[start+2],0,1))
-    elseif tStr == "UDim" then return UDim.new(src[start], src[start+1])
-    elseif tStr == "UDim2" then return UDim2.new(src[start], src[start+1], src[start+2], src[start+3]) end
-    return 0
-end
-
-function AnalyticalMotion.Step(dt: number)
-    if dt > 0.05 then dt = 0.05 end
-    local i = 1
-    while i <= activeCount do
-        local inst = cache_Instances[i]
-        if not inst or not inst.Parent then AnalyticalMotion._removeAt(i) continue end
-        
-        local tStr = cache_Types[i]
-        local dim = getDimension(tStr)
-        local offset = cache_Offsets[i]
-        local k, c, done = cache_Stiffness[i], cache_Damping[i], true
-        
-        for d = 0, dim - 1 do
-            local pIdx = offset + d
-            local p, v, targ = cache_Positions[pIdx], cache_Velocities[pIdx], cache_Targets[pIdx]
-            local acc = (-k * (p - targ)) - (c * v)
-            v += acc * dt p += v * dt
-            if math.abs(v) < 0.0001 and math.abs(p - targ) < 0.0001 then p = targ v = 0 else done = false end
-            cache_Positions[pIdx] = p cache_Velocities[pIdx] = v
-        end
-        
-        local prop = cache_Props[i]
-        if tStr == "Transparency" then
-            pcall(function() inst.BackgroundTransparency = cache_Positions[offset] end)
-        else
-            pcall(function() (inst :: any)[prop] = unpackData(tStr, cache_Positions, offset) end)
-        end
-        
-        if done then AnalyticalMotion._removeAt(i) else i += 1 end
-    end
-end
-
-function AnalyticalMotion.Link(inst: Instance, prop: string, target: any, stiffness: number?, damping: number?)
-    local tStr = typeof(target)
-    if prop:find("Transparency") then tStr = "Transparency" end
-    if not mapping[inst] then mapping[inst] = {} end
-    local idx = mapping[inst][prop]
-    if not idx then
-        activeCount += 1 idx = activeCount mapping[inst][prop] = idx
-        cache_Instances[idx] = inst cache_Props[idx] = prop cache_Types[idx] = tStr
-        cache_Offsets[idx] = (idx == 1) and 1 or (cache_Offsets[idx-1] + getDimension(cache_Types[idx-1]))
-        local cVal = (tStr == "Transparency") and ((inst :: any).BackgroundTransparency or 0) or (inst :: any)[prop]
-        pack(tStr, cVal or target, cache_Positions, cache_Offsets[idx])
-        for d = 0, getDimension(tStr) - 1 do cache_Velocities[cache_Offsets[idx]+d] = 0 end
-    end
-    cache_Stiffness[idx] = stiffness or 320 cache_Damping[idx] = damping or 24
-    pack(tStr, target, cache_Targets, cache_Offsets[idx])
-end
-
-function AnalyticalMotion._removeAt(idx: number)
-    local inst, prop = cache_Instances[idx], cache_Props[idx]
-    if mapping[inst] then mapping[inst][prop] = nil if next(mapping[inst]) == nil then mapping[inst] = nil end end
-    if idx == activeCount then
-        cache_Instances[idx] = nil cache_Props[idx] = nil activeCount -= 1
-    else
-        cache_Instances[idx] = cache_Instances[activeCount] cache_Props[idx] = cache_Props[activeCount]
-        cache_Types[idx] = cache_Types[activeCount] cache_Stiffness[idx] = cache_Stiffness[activeCount]
-        cache_Damping[idx] = cache_Damping[activeCount] cache_Offsets[idx] = cache_Offsets[activeCount]
-        if mapping[cache_Instances[idx]] then mapping[cache_Instances[idx]][cache_Props[idx]] = idx end
-        cache_Instances[activeCount] = nil cache_Props[activeCount] = nil activeCount -= 1
-    end
-end
-
-game:GetService("RunService").Heartbeat:Connect(AnalyticalMotion.Step)
-
--- [2] THEMES
-local TokenEngine = {}
-local _tokenRegistry = {}
-
-function TokenEngine.Register(name: string, val: any)
-    if _tokenRegistry[name] then _tokenRegistry[name]:Set(val) else _tokenRegistry[name] = StateGraph.CreateState(val) end
-end
-
-function TokenEngine.Get(name: string)
-    if not _tokenRegistry[name] then _tokenRegistry[name] = StateGraph.CreateState(false) end
-    return _tokenRegistry[name]
-end
-
-local ThemeEngine = {}
-local _themes = {
-    Dark = { 
-        Background = Color3.fromRGB(11, 12, 16),
-        Sidebar = Color3.fromRGB(16, 18, 24),
-        Surface = Color3.fromRGB(20, 22, 30), 
-        Card = Color3.fromRGB(26, 29, 40),
-        Border = Color3.fromRGB(38, 42, 58), 
-        Accent = Color3.fromRGB(99, 102, 241),
-        AccentGlow = Color3.fromRGB(129, 140, 248),
-        Text = Color3.fromRGB(243, 244, 246), 
-        Muted = Color3.fromRGB(148, 163, 184), 
-        Font = Enum.Font.GothamMedium 
-    }
+-- [[ CONFIGURAÇÕES DE DESIGN (TEMA ESCURO & VERMELHO) ]]
+local Theme = {
+	Background = Color3.fromRGB(15, 15, 15),
+	TopBar = Color3.fromRGB(22, 22, 22),
+	Sidebar = Color3.fromRGB(18, 18, 18),
+	Accent = Color3.fromRGB(215, 35, 35),
+	AccentHover = Color3.fromRGB(255, 50, 50),
+	CardBg = Color3.fromRGB(25, 25, 25),
+	TextColor = Color3.fromRGB(240, 240, 240),
+	TextMuted = Color3.fromRGB(150, 150, 150),
+	Stroke = Color3.fromRGB(40, 40, 40),
+	CornerRadius = UDim.new(0, 12),
+	Font = Enum.Font.GothamMedium,
+	FontBold = Enum.Font.GothamBold
 }
 
-function ThemeEngine.Apply(themeName: string)
-    local t = _themes[themeName] if not t then return end
-    for k, v in pairs(t) do TokenEngine.Register(k, v) end
-end
-ThemeEngine.Apply("Dark")
-
--- [3] WINDOW & PAGE ENGINE
-local Window = {} Window.__index = Window
-
-function Window.new(titleText: string, subtitleText: string?)
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "KazeUI_RunDirect"
-    screenGui.ResetOnSpawn = false
-    
-    local success, _ = pcall(function() screenGui.Parent = game:GetService("CoreGui") end)
-    if not success then screenGui.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
-    
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 580, 0, 420)
-    frame.Position = UDim2.new(0.5, -290, 0.5, -210)
-    frame.BackgroundColor3 = TokenEngine.Get("Background"):Get()
-    frame.ClipsDescendants = true frame.Active = true frame.Parent = screenGui
-    
-    local mainCorner = Instance.new("UICorner") mainCorner.CornerRadius = UDim.new(0, 14) mainCorner.Parent = frame
-    local mainStroke = Instance.new("UIStroke") mainStroke.Color = TokenEngine.Get("Border"):Get() mainStroke.Thickness = 1 mainStroke.Parent = frame
-    
-    local sidebar = Instance.new("Frame")
-    sidebar.Size = UDim2.new(0, 160, 1, 0)
-    sidebar.BackgroundColor3 = TokenEngine.Get("Sidebar"):Get() sidebar.Parent = frame
-    
-    local sidebarBorder = Instance.new("Frame")
-    sidebarBorder.Size = UDim2.new(0, 1, 1, 0) sidebarBorder.Position = UDim2.new(1, -1, 0, 0)
-    sidebarBorder.BackgroundColor3 = TokenEngine.Get("Border"):Get() sidebarBorder.BorderSizePixel = 0 sidebarBorder.Parent = sidebar
-    
-    local headerFrame = Instance.new("Frame")
-    headerFrame.Size = UDim2.new(1, 0, 0, 54) headerFrame.BackgroundTransparency = 1 headerFrame.Parent = sidebar
-    
-    local titleLbl = Instance.new("TextLabel")
-    titleLbl.Size = UDim2.new(1, -24, 0, 22) titleLbl.Position = UDim2.new(0, 14, 0, 12)
-    titleLbl.BackgroundTransparency = 1 titleLbl.Text = titleText
-    titleLbl.TextColor3 = TokenEngine.Get("Text"):Get() titleLbl.Font = Enum.Font.GothamBold
-    titleLbl.TextSize = 15 titleLbl.TextXAlignment = Enum.TextXAlignment.Left titleLbl.Parent = headerFrame
-    
-    local subLbl = Instance.new("TextLabel")
-    subLbl.Size = UDim2.new(1, -24, 0, 14) subLbl.Position = UDim2.new(0, 14, 0, 32)
-    subLbl.BackgroundTransparency = 1 subLbl.Text = subtitleText or "Wind Interface v2.0"
-    subLbl.TextColor3 = TokenEngine.Get("Muted"):Get() subLbl.Font = TokenEngine.Get("Font"):Get()
-    subLbl.TextSize = 10 subLbl.TextXAlignment = Enum.TextXAlignment.Left subLbl.Parent = headerFrame
-    
-    local tabContainer = Instance.new("ScrollingFrame")
-    tabContainer.Size = UDim2.new(1, 0, 1, -54) tabContainer.Position = UDim2.new(0, 0, 0, 54)
-    tabContainer.BackgroundTransparency = 1 tabContainer.CanvasSize = UDim2.new(0,0,0,0)
-    tabContainer.ScrollBarThickness = 0 tabContainer.Parent = sidebar
-    
-    local tabLayout = Instance.new("UIListLayout") tabLayout.Padding = UDim.new(0, 4) tabLayout.SortOrder = Enum.SortOrder.LayoutOrder tabLayout.Parent = tabContainer
-    local tabPadding = Instance.new("UIPadding") tabPadding.PaddingLeft = UDim.new(0, 8) tabPadding.PaddingRight = UDim.new(0, 8) tabPadding.Parent = tabContainer
-    
-    local pagesContainer = Instance.new("Frame")
-    pagesContainer.Size = UDim2.new(1, -160, 1, 0) pagesContainer.Position = UDim2.new(0, 160, 0, 0)
-    pagesContainer.BackgroundTransparency = 1 pagesContainer.Parent = frame
-    
-    local drag, dragStart, startPos
-    headerFrame.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            drag = true dragStart = input.Position startPos = frame.Position
-            input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then drag = false end end)
-        end
-    end)
-    game:GetService("UserInputService").InputChanged:Connect(function(input)
-        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            AnalyticalMotion.Link(frame, "Position", UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y), 650, 26)
-        end
-    end)
-    
-    return setmetatable({
-        Base = screenGui, Frame = frame, TabContainer = tabContainer, PagesContainer = pagesContainer,
-        Tabs = {}, TabButtons = {}, CurrentTab = StateGraph.CreateState("")
-    }, Window)
+-- [[ FUNÇÕES AUXILIARES ]]
+local function CreateTween(instance, duration, properties)
+	local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local tween = TweenService:Create(instance, tweenInfo, properties)
+	tween:Play()
+	return tween
 end
 
-local Page = {} Page.__index = Page
+local function MakeDraggable(dragFrame, parentFrame)
+	local dragging, dragInput, dragStart, startPos
 
-function Page.new(parentContainer: Instance)
-    local scroller = Instance.new("ScrollingFrame")
-    scroller.Size = UDim2.new(1, 0, 1, 0) scroller.BackgroundTransparency = 1
-    scroller.CanvasSize = UDim2.new(0, 0, 0, 0) scroller.ScrollBarThickness = 2
-    scroller.ScrollBarImageColor3 = TokenEngine.Get("Border"):Get()
-    scroller.Visible = false scroller.Parent = parentContainer
-    
-    local layout = Instance.new("UIListLayout") layout.Padding = UDim.new(0, 8) layout.SortOrder = Enum.SortOrder.LayoutOrder layout.Parent = scroller
-    local padding = Instance.new("UIPadding") padding.PaddingTop = UDim.new(0, 16) padding.PaddingBottom = UDim.new(0, 16)
-    padding.PaddingLeft = UDim.new(0, 16) padding.PaddingRight = UDim.new(0, 16) padding.Parent = scroller
-    
-    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        scroller.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 32)
-    end)
-    
-    return setmetatable({ Container = scroller }, Page)
+	dragFrame.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = parentFrame.Position
+
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	dragFrame.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if input == dragInput and dragging then
+			local delta = input.Position - dragStart
+			parentFrame.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
 end
 
-function Window:Tab(name: string)
-    local page = Page.new(self.PagesContainer)
-    self.Tabs[name] = page
-    
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 34) btn.BackgroundColor3 = TokenEngine.Get("Sidebar"):Get()
-    btn.Text = "" btn.AutoButtonColor = false btn.Parent = self.TabContainer
-    
-    local btnCorner = Instance.new("UICorner") btnCorner.CornerRadius = UDim.new(0, 8) btnCorner.Parent = btn
-    
-    local indicator = Instance.new("Frame")
-    indicator.Size = UDim2.new(0, 3, 0, 16) indicator.Position = UDim2.new(0, 2, 0.5, -8)
-    indicator.BackgroundColor3 = TokenEngine.Get("Accent"):Get() indicator.BackgroundTransparency = 1 indicator.Parent = btn
-    
-    local indCorner = Instance.new("UICorner") indCorner.CornerRadius = UDim.new(1, 0) indCorner.Parent = indicator
-    
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -20, 1, 0) lbl.Position = UDim2.new(0, 14, 0, 0)
-    lbl.BackgroundTransparency = 1 lbl.Text = name
-    lbl.TextColor3 = TokenEngine.Get("Muted"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
-    lbl.TextSize = 12 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = btn
-    
-    self.TabButtons[name] = { Button = btn, Label = lbl, Indicator = indicator }
-    
-    btn.MouseButton1Click:Connect(function() self:SelectTab(name) end)
-    if self.CurrentTab:Get() == "" then self:SelectTab(name) end
-    return page
+-- [[ CONSTRUTOR DA WINDOW PRINCIPAL ]]
+function Muzysh.Init(title)
+	local self = setmetatable({}, Muzysh)
+	
+	-- Instância base da ScreenGui
+	self.ScreenGui = Instance.new("ScreenGui")
+	self.ScreenGui.Name = "Muzysh_Library"
+	self.ScreenGui.ResetOnSpawn = false
+	self.ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	
+	-- Proteção básica contra detecção simples (se injetado)
+	if syn and syn.protect_gui then
+		syn.protect_gui(self.ScreenGui)
+		self.ScreenGui.Parent = CoreGui
+	else
+		self.ScreenGui.Parent = PlayerGui
+	end
+
+	-- Container Principal (Responsivo para Mobile)
+	self.MainFrame = Instance.new("Frame")
+	self.MainFrame.Name = "MainFrame"
+	self.MainFrame.Size = UDim2.new(0, 580, 0, 360) -- Proporções perfeitas para Mobile e PC
+	self.MainFrame.Position = UDim2.new(0.5, -290, 0.5, -180)
+	self.MainFrame.BackgroundColor3 = Theme.Background
+	self.MainFrame.ClipsDescendants = true
+	self.MainFrame.Parent = self.ScreenGui
+
+	-- Guarda o tamanho original para uso na funcionalidade de minimizar
+	self.OriginalSize = UDim2.new(0, 580, 0, 360)
+
+	-- Cantos Arredondados e Borda Sutil
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = Theme.CornerRadius
+	corner.Parent = self.MainFrame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Theme.Stroke
+	stroke.Thickness = 1
+	stroke.Parent = self.MainFrame
+
+	-- Responsividade automática via UIScale para telas muito pequenas
+	local uiScale = Instance.new("UIScale")
+	uiScale.Parent = self.MainFrame
+	
+	local function UpdateScale()
+		local viewportSize = workspace.CurrentCamera.ViewportSize
+		if viewportSize.X < 600 or viewportSize.Y < 400 then
+			uiScale.Scale = math.min(viewportSize.X / 620, viewportSize.Y / 400)
+		else
+			uiScale.Scale = 1
+		end
+	end
+	UpdateScale()
+	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(UpdateScale)
+
+	-- TopBar
+	self.TopBar = Instance.new("Frame")
+	self.TopBar.Name = "TopBar"
+	self.TopBar.Size = UDim2.new(1, 0, 0, 45)
+	self.TopBar.BackgroundColor3 = Theme.TopBar
+	self.TopBar.Parent = self.MainFrame
+	MakeDraggable(self.TopBar, self.MainFrame)
+
+	local topCorner = Instance.new("UICorner")
+	topCorner.CornerRadius = Theme.CornerRadius
+	topCorner.Parent = self.TopBar
+
+	-- Título (Logo + Nome)
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Size = UDim2.new(0, 200, 1, 0)
+	titleLabel.Position = UDim2.new(0, 15, 0, 0)
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Text = "Muzysh <font color='rgb(215,35,35)'>.</font>"
+	titleLabel.TextColor3 = Theme.TextColor
+	titleLabel.Font = Theme.FontBold
+	titleLabel.TextSize = 18
+	titleLabel.RichText = true
+	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	titleLabel.Parent = self.TopBar
+
+	-- Botão Fechar
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.new(0, 35, 0, 35)
+	closeBtn.Position = UDim2.new(1, -40, 0, 5)
+	closeBtn.BackgroundTransparency = 1
+	closeBtn.Text = "×"
+	closeBtn.TextColor3 = Theme.TextMuted
+	closeBtn.Font = Theme.Font
+	closeBtn.TextSize = 24
+	closeBtn.Parent = self.TopBar
+
+	closeBtn.MouseEnter:Connect(function() CreateTween(closeBtn, 0.2, {TextColor3 = Theme.Accent}) end)
+	closeBtn.MouseLeave:Connect(function() CreateTween(closeBtn, 0.2, {TextColor3 = Theme.TextMuted}) end)
+	closeBtn.MouseButton1Click:Connect(function()
+		-- Se o botão flutuante existir, remover antes de destruir a GUI
+		if self.FloatingBtn then
+			self.FloatingBtn:Destroy()
+			self.FloatingBtn = nil
+		end
+		CreateTween(self.MainFrame, 0.3, {Size = UDim2.new(0,0,0,0), ImageTransparency = 1})
+		task.wait(0.3)
+		self.ScreenGui:Destroy()
+	end)
+
+	-- =================== [ NOVO: BOTÃO MINIMIZAR ] ===================
+	local minimizeBtn = Instance.new("TextButton")
+	minimizeBtn.Size = UDim2.new(0, 35, 0, 35)
+	minimizeBtn.Position = UDim2.new(1, -85, 0, 5) -- ao lado do closeBtn
+	minimizeBtn.BackgroundTransparency = 1
+	minimizeBtn.Text = "−" -- ou "_", caractere sutil
+	minimizeBtn.TextColor3 = Theme.TextMuted
+	minimizeBtn.Font = Theme.Font
+	minimizeBtn.TextSize = 28
+	minimizeBtn.Parent = self.TopBar
+
+	-- Mesmos efeitos de hover/transição do botão fechar
+	minimizeBtn.MouseEnter:Connect(function() CreateTween(minimizeBtn, 0.2, {TextColor3 = Theme.Accent}) end)
+	minimizeBtn.MouseLeave:Connect(function() CreateTween(minimizeBtn, 0.2, {TextColor3 = Theme.TextMuted}) end)
+
+	-- Funcionalidade de minimizar
+	local function minimizeWindow()
+		-- Anima o MainFrame para tamanho zero e depois oculta
+		CreateTween(self.MainFrame, 0.3, {Size = UDim2.new(0, 0, 0, 0)})
+		task.wait(0.3)
+		self.MainFrame.Visible = false
+
+		-- Cria/Exibe o botão flutuante para reabrir
+		if not self.FloatingBtn then
+			local floater = Instance.new("ImageButton")
+			floater.Name = "MinimizeFloater"
+			floater.Size = UDim2.new(0, 56, 0, 56) -- botão discreto
+			floater.Position = UDim2.new(0, 16, 1, -80) -- canto inferior esquerdo
+			floater.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+			floater.BackgroundTransparency = 0.3
+			floater.Image = "rbxassetid://72939763737478"
+			floater.ScaleType = Enum.ScaleType.Fit
+			floater.ImageTransparency = 0.1
+			floater.AutoButtonColor = false
+			floater.Parent = self.ScreenGui
+
+			-- Arredondado (circular)
+			local floaterCorner = Instance.new("UICorner")
+			floaterCorner.CornerRadius = UDim.new(1, 0)
+			floaterCorner.Parent = floater
+
+			-- Efeito de hover sutil
+			floater.MouseEnter:Connect(function()
+				CreateTween(floater, 0.2, {BackgroundTransparency = 0.1})
+			end)
+			floater.MouseLeave:Connect(function()
+				CreateTween(floater, 0.2, {BackgroundTransparency = 0.3})
+			end)
+
+			-- Torna o botão flutuante arrastável (mobile-friendly)
+			local dragStartPos, startBtnPos
+			floater.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					dragStartPos = input.Position
+					startBtnPos = floater.Position
+					input.Changed:Connect(function()
+						if input.UserInputState == Enum.UserInputState.End then
+							dragStartPos = nil
+						end
+					end)
+				end
+			end)
+			floater.InputChanged:Connect(function(input)
+				if dragStartPos and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+					local delta = input.Position - dragStartPos
+					floater.Position = UDim2.new(
+						startBtnPos.X.Scale,
+						startBtnPos.X.Offset + delta.X,
+						startBtnPos.Y.Scale,
+						startBtnPos.Y.Offset + delta.Y
+					)
+				end
+			end)
+
+			-- Clique para reabrir a janela
+			floater.MouseButton1Click:Connect(function()
+				floater.Visible = false
+				self.MainFrame.Visible = true
+				CreateTween(self.MainFrame, 0.3, {Size = self.OriginalSize})
+			end)
+
+			self.FloatingBtn = floater
+		else
+			self.FloatingBtn.Visible = true
+		end
+	end
+
+	minimizeBtn.MouseButton1Click:Connect(minimizeWindow)
+	-- ================================================================
+
+	-- Sidebar (Menu de Navegação Lateral)
+	self.Sidebar = Instance.new("Frame")
+	self.Sidebar.Name = "Sidebar"
+	self.Sidebar.Size = UDim2.new(0, 130, 1, -45)
+	self.Sidebar.Position = UDim2.new(0, 0, 0, 45)
+	self.Sidebar.BackgroundColor3 = Theme.Sidebar
+	self.Sidebar.Parent = self.MainFrame
+
+	local sideLayout = Instance.new("UIListLayout")
+	sideLayout.Padding = UDim.new(0, 5)
+	sideLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	sideLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	sideLayout.Parent = self.Sidebar
+
+	local sidePadding = Instance.new("UIPadding")
+	sidePadding.PaddingTop = UDim.new(0, 10)
+	sidePadding.Parent = self.Sidebar
+
+	-- Container de Páginas (Onde os scripts/elementos vão ficar)
+	self.PageContainer = Instance.new("Frame")
+	self.PageContainer.Name = "PageContainer"
+	self.PageContainer.Size = UDim2.new(1, -140, 1, -55)
+	self.PageContainer.Position = UDim2.new(0, 135, 0, 50)
+	self.PageContainer.BackgroundTransparency = 1
+	self.PageContainer.Parent = self.MainFrame
+
+	self.Pages = {}
+	self.Tabs = {}
+	self.FirstPage = nil
+
+	-- Animação de entrada Premium
+	self.MainFrame.Size = UDim2.new(0, 0, 0, 0)
+	CreateTween(self.MainFrame, 0.4, {Size = self.OriginalSize})
+
+	return self
 end
 
-function Window:SelectTab(name: string)
-    local old = self.CurrentTab:Get()
-    if old == name then return end
-    self.CurrentTab:Set(name)
-    
-    for tName, page in pairs(self.Tabs) do
-        local isTarget = (tName == name)
-        page.Container.Visible = isTarget
-        
-        local tabObj = self.TabButtons[tName]
-        if tabObj then
-            local targetBg = isTarget and TokenEngine.Get("Surface"):Get() or TokenEngine.Get("Sidebar"):Get()
-            local targetText = isTarget and TokenEngine.Get("Text"):Get() or TokenEngine.Get("Muted"):Get()
-            local targetIndTrans = isTarget and 0 or 1
-            
-            AnalyticalMotion.Link(tabObj.Button, "BackgroundColor3", targetBg, 400, 22)
-            AnalyticalMotion.Link(tabObj.Label, "TextColor3", targetText, 400, 22)
-            AnalyticalMotion.Link(tabObj.Indicator, "BackgroundTransparency", targetIndTrans, 400, 22)
-        end
-    end
+-- [[ CRIADOR DE ABAS (PÁGINAS) ]]
+function Muzysh:CreatePage(pageName)
+	local pageId = #self.Pages + 1
+
+	-- Frame da Página de Conteúdo (Scrolling para suportar infinitos componentes)
+	local pageFrame = Instance.new("ScrollingFrame")
+	pageFrame.Name = pageName .. "_Page"
+	pageFrame.Size = UDim2.new(1, 0, 1, 0)
+	pageFrame.BackgroundTransparency = 1
+	pageFrame.ScrollBarThickness = 2
+	pageFrame.ScrollBarImageColor3 = Theme.Accent
+	pageFrame.Visible = false
+	pageFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	pageFrame.Parent = self.PageContainer
+
+	local pageLayout = Instance.new("UIListLayout")
+	pageLayout.Padding = UDim.new(0, 8)
+	pageLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	pageLayout.Parent = pageFrame
+
+	pageLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		pageFrame.CanvasSize = UDim2.new(0, 0, 0, pageLayout.AbsoluteContentSize.Y + 15)
+	end)
+
+	local pagePadding = Instance.new("UIPadding")
+	pagePadding.PaddingLeft = UDim.new(0, 5)
+	pagePadding.PaddingRight = UDim.new(0, 10)
+	pagePadding.PaddingTop = UDim.new(0, 5)
+	pagePadding.Parent = pageFrame
+
+	-- Botão da Aba na Sidebar
+	local tabBtn = Instance.new("TextButton")
+	tabBtn.Name = pageName .. "_Tab"
+	tabBtn.Size = UDim2.new(0, 115, 0, 35)
+	tabBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	tabBtn.BackgroundTransparency = 1
+	tabBtn.Text = "  " .. pageName
+	tabBtn.TextColor3 = Theme.TextMuted
+	tabBtn.Font = Theme.Font
+	tabBtn.TextSize = 14
+	tabBtn.TextXAlignment = Enum.TextXAlignment.Left
+	tabBtn.Parent = self.Sidebar
+
+	local tabCorner = Instance.new("UICorner")
+	tabCorner.CornerRadius = UDim.new(0, 6)
+	tabCorner.Parent = tabBtn
+
+	-- Indicador Lateral Ativo (Visual Premium)
+	local indicator = Instance.new("Frame")
+	indicator.Size = UDim2.new(0, 3, 0, 0)
+	indicator.Position = UDim2.new(0, 0, 0.5, 0)
+	indicator.BackgroundColor3 = Theme.Accent
+	indicator.BorderSizePixel = 0
+	indicator.Parent = tabBtn
+
+	-- Mecânica de Alternância de Abas
+	local function SelectPage()
+		for _, p in pairs(self.Pages) do p.Visible = false end
+		for t, ind in pairs(self.Tabs) do 
+			CreateTween(t, 0.2, {TextColor3 = Theme.TextMuted, BackgroundTransparency = 1})
+			CreateTween(ind, 0.2, {Size = UDim2.new(0, 3, 0, 0), Position = UDim2.new(0, 0, 0.5, 0)})
+		end
+		pageFrame.Visible = true
+		CreateTween(tabBtn, 0.2, {TextColor3 = Theme.TextColor, BackgroundTransparency = 0.8})
+		CreateTween(indicator, 0.2, {Size = UDim2.new(0, 3, 0, 18), Position = UDim2.new(0, 0, 0.25, 0)})
+	end
+
+	tabBtn.MouseButton1Click:Connect(SelectPage)
+	self.Pages[pageId] = pageFrame
+	self.Tabs[tabBtn] = indicator
+
+	if not self.FirstPage then
+		self.FirstPage = SelectPage
+		task.spawn(SelectPage)
+	end
+
+	-- Métodos internos para adicionar componentes dentro desta página específica
+	local elements = {}
+
+	-- [ COMPONENTE: SEPARADOR / TÍTULO ]
+	function elements:CreateSection(titleText)
+		local sectionFrame = Instance.new("Frame")
+		sectionFrame.Size = UDim2.new(1, 0, 0, 25)
+		sectionFrame.BackgroundTransparency = 1
+		sectionFrame.Parent = pageFrame
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, 0, 1, 0)
+		label.Text = titleText:upper()
+		label.Font = Theme.FontBold
+		label.TextSize = 11
+		label.TextColor3 = Theme.Accent
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.BackgroundTransparency = 1
+		label.Parent = sectionFrame
+	end
+
+	-- [ COMPONENTE: BOTÃO PREMIUM ]
+	function elements:CreateButton(btnText, callback)
+		callback = callback or function() end
+		
+		local btnFrame = Instance.new("Frame")
+		btnFrame.Size = UDim2.new(1, 0, 0, 40)
+		btnFrame.BackgroundColor3 = Theme.CardBg
+		btnFrame.Parent = pageFrame
+
+		local btnCorner = Instance.new("UICorner")
+		btnCorner.CornerRadius = UDim.new(0, 8)
+		btnCorner.Parent = btnFrame
+
+		local realBtn = Instance.new("TextButton")
+		realBtn.Size = UDim2.new(1, -10, 1, -10)
+		realBtn.Position = UDim2.new(0, 5, 0, 5)
+		realBtn.BackgroundColor3 = Theme.Accent
+		realBtn.Text = btnText
+		realBtn.TextColor3 = Theme.TextColor
+		realBtn.Font = Theme.Font
+		realBtn.TextSize = 14
+		realBtn.Parent = btnFrame
+
+		local rbCorner = Instance.new("UICorner")
+		rbCorner.CornerRadius = UDim.new(0, 6)
+		rbCorner.Parent = realBtn
+
+		-- Efeito de Hover e Clique Responsivo (Scale Effect)
+		realBtn.MouseEnter:Connect(function() CreateTween(realBtn, 0.2, {BackgroundColor3 = Theme.AccentHover}) end)
+		realBtn.MouseLeave:Connect(function() CreateTween(realBtn, 0.2, {BackgroundColor3 = Theme.Accent}) end)
+		
+		realBtn.MouseButton1Down:Connect(function()
+			CreateTween(realBtn, 0.1, {Size = UDim2.new(1, -14, 1, -14), Position = UDim2.new(0, 7, 0, 7)})
+		end)
+		
+		realBtn.MouseButton1Up:Connect(function()
+			CreateTween(realBtn, 0.1, {Size = UDim2.new(1, -10, 1, -10), Position = UDim2.new(0, 5, 0, 5)})
+			callback()
+		end)
+	end
+
+	-- [ COMPONENTE: TOGGLE (CHAVE) ]
+	function elements:CreateToggle(toggleText, default, callback)
+		callback = callback or function() end
+		local state = default or false
+
+		local toggleFrame = Instance.new("Frame")
+		toggleFrame.Size = UDim2.new(1, 0, 0, 40)
+		toggleFrame.BackgroundColor3 = Theme.CardBg
+		toggleFrame.Parent = pageFrame
+
+		local tfCorner = Instance.new("UICorner")
+		tfCorner.CornerRadius = UDim.new(0, 8)
+		tfCorner.Parent = toggleFrame
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(0.7, 0, 1, 0)
+		label.Position = UDim2.new(0, 12, 0, 0)
+		label.BackgroundTransparency = 1
+		label.Text = toggleText
+		label.TextColor3 = Theme.TextColor
+		label.Font = Theme.Font
+		label.TextSize = 14
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Parent = toggleFrame
+
+		-- Switch externo
+		local switch = Instance.new("TextButton")
+		switch.Size = UDim2.new(0, 42, 0, 22)
+		switch.Position = UDim2.new(1, -54, 0.5, -11)
+		switch.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+		switch.Text = ""
+		switch.Parent = toggleFrame
+
+		local swCorner = Instance.new("UICorner")
+		swCorner.CornerRadius = UDim.new(1, 0)
+		swCorner.Parent = switch
+
+		-- Slider interno
+		local sliderCircle = Instance.new("Frame")
+		sliderCircle.Size = UDim2.new(0, 16, 0, 16)
+		sliderCircle.Position = state and UDim2.new(1, -20, 0.5, -8) or UDim2.new(0, 4, 0.5, -8)
+		sliderCircle.BackgroundColor3 = Theme.TextColor
+		sliderCircle.Parent = switch
+
+		local scCorner = Instance.new("UICorner")
+		scCorner.CornerRadius = UDim.new(1, 0)
+		scCorner.Parent = sliderCircle
+
+		if state then switch.BackgroundColor3 = Theme.Accent end
+
+		switch.MouseButton1Click:Connect(function()
+			state = not state
+			if state then
+				CreateTween(switch, 0.2, {BackgroundColor3 = Theme.Accent})
+				CreateTween(sliderCircle, 0.2, {Position = UDim2.new(1, -20, 0.5, -8)})
+			else
+				CreateTween(switch, 0.2, {BackgroundColor3 = Color3.fromRGB(40, 40, 40)})
+				CreateTween(sliderCircle, 0.2, {Position = UDim2.new(0, 4, 0.5, -8)})
+			end
+			callback(state)
+		end)
+	end
+
+	-- [ COMPONENTE: SLIDER ]
+	function elements:CreateSlider(sliderText, min, max, default, callback)
+		callback = callback or function() end
+		local value = default or min
+
+		local sliderFrame = Instance.new("Frame")
+		sliderFrame.Size = UDim2.new(1, 0, 0, 50)
+		sliderFrame.BackgroundColor3 = Theme.CardBg
+		sliderFrame.Parent = pageFrame
+
+		local sfCorner = Instance.new("UICorner")
+		sfCorner.CornerRadius = UDim.new(0, 8)
+		sfCorner.Parent = sliderFrame
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(0.6, 0, 0, 25)
+		label.Position = UDim2.new(0, 12, 0, 2)
+		label.BackgroundTransparency = 1
+		label.Text = sliderText
+		label.TextColor3 = Theme.TextColor
+		label.Font = Theme.Font
+		label.TextSize = 14
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Parent = sliderFrame
+
+		local valLabel = Instance.new("TextLabel")
+		valLabel.Size = UDim2.new(0.3, 0, 0, 25)
+		valLabel.Position = UDim2.new(1, -112, 0, 2)
+		valLabel.BackgroundTransparency = 1
+		valLabel.Text = tostring(value)
+		valLabel.TextColor3 = Theme.Accent
+		valLabel.Font = Theme.Font
+		valLabel.TextSize = 14
+		valLabel.TextXAlignment = Enum.TextXAlignment.Right
+		valLabel.Parent = sliderFrame
+
+		-- Trilha do Slider
+		local track = Instance.new("TextButton")
+		track.Size = UDim2.new(1, -24, 0, 6)
+		track.Position = UDim2.new(0, 12, 0, 34)
+		track.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+		track.Text = ""
+		track.Parent = sliderFrame
+
+		local trCorner = Instance.new("UICorner")
+		trCorner.CornerRadius = UDim.new(1, 0)
+		trCorner.Parent = track
+
+		local fill = Instance.new("Frame")
+		fill.Size = UDim2.new((value - min) / (max - min), 0, 1, 0)
+		fill.BackgroundColor3 = Theme.Accent
+		fill.BorderSizePixel = 0
+		fill.Parent = track
+
+		local fillCorner = Instance.new("UICorner")
+		fillCorner.CornerRadius = UDim.new(1, 0)
+		fillCorner.Parent = fill
+
+		-- Lógica de Arrastar com Mouse/Touch
+		local snap = Instance.new("Frame") -- Knob oculto/área ampliada para toque fácil
+		snap.Size = UDim2.new(0, 16, 0, 16)
+		snap.Position = UDim2.new((value - min) / (max - min), -8, 0.5, -8)
+		snap.BackgroundColor3 = Theme.TextColor
+		snap.Parent = track
+
+		local snCorner = Instance.new("UICorner")
+		snCorner.CornerRadius = UDim.new(1, 0)
+		snCorner.Parent = snap
+
+		local sliding = false
+
+		local function UpdateSlider(input)
+			local percentage = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteWidth, 0, 1)
+			value = math.floor(min + (max - min) * percentage)
+			valLabel.Text = tostring(value)
+			CreateTween(fill, 0.1, {Size = UDim2.new(percentage, 0, 1, 0)})
+			CreateTween(snap, 0.1, {Position = UDim2.new(percentage, -8, 0.5, -8)})
+			callback(value)
+		end
+
+		track.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				sliding = true
+				UpdateSlider(input)
+			end
+		end)
+
+		UserInputService.InputChanged:Connect(function(input)
+			if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				UpdateSlider(input)
+			end
+		end)
+
+		UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				sliding = false
+			end
+		end)
+	end
+
+	-- [ COMPONENTE: DROPDOWN ]
+	function elements:CreateDropdown(dropText, list, callback)
+		callback = callback or function() end
+		local isOpened = false
+
+		local dropFrame = Instance.new("Frame")
+		dropFrame.Size = UDim2.new(1, 0, 0, 40)
+		dropFrame.BackgroundColor3 = Theme.CardBg
+		dropFrame.ClipsDescendants = true
+		dropFrame.Parent = pageFrame
+
+		local dfCorner = Instance.new("UICorner")
+		dfCorner.CornerRadius = UDim.new(0, 8)
+		dfCorner.Parent = dropFrame
+
+		local mainBtn = Instance.new("TextButton")
+		mainBtn.Size = UDim2.new(1, 0, 0, 40)
+		mainBtn.BackgroundTransparency = 1
+		mainBtn.Text = "  " .. dropText
+		mainBtn.TextColor3 = Theme.TextColor
+		mainBtn.Font = Theme.Font
+		mainBtn.TextSize = 14
+		mainBtn.TextXAlignment = Enum.TextXAlignment.Left
+		mainBtn.Parent = dropFrame
+
+		local arrow = Instance.new("TextLabel")
+		arrow.Size = UDim2.new(0, 40, 0, 40)
+		arrow.Position = UDim2.new(1, -40, 0, 0)
+		arrow.BackgroundTransparency = 1
+		arrow.Text = "▼"
+		arrow.TextColor3 = Theme.TextMuted
+		arrow.Font = Theme.Font
+		arrow.TextSize = 12
+		arrow.Parent = mainBtn
+
+		-- Lista Container
+		local listHolder = Instance.new("Frame")
+		listHolder.Size = UDim2.new(1, -20, 1, -45)
+		listHolder.Position = UDim2.new(0, 10, 0, 42)
+		listHolder.BackgroundTransparency = 1
+		listHolder.Parent = dropFrame
+
+		local listLayout = Instance.new("UIListLayout")
+		listLayout.Padding = UDim.new(0, 4)
+		listLayout.Parent = listHolder
+
+		-- População dos botões da lista
+		for _, opt in pairs(list) do
+			local optBtn = Instance.new("TextButton")
+			optBtn.Size = UDim2.new(1, 0, 0, 30)
+			optBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+			optBtn.Text = opt
+			optBtn.TextColor3 = Theme.TextMuted
+			optBtn.Font = Theme.Font
+			optBtn.TextSize = 13
+			optBtn.Parent = listHolder
+
+			local obc = Instance.new("UICorner")
+			obc.CornerRadius = UDim.new(0, 6)
+			obc.Parent = optBtn
+
+			optBtn.MouseButton1Click:Connect(function()
+				mainBtn.Text = "  " .. dropText .. " (" .. opt .. ")"
+				isOpened = false
+				CreateTween(dropFrame, 0.2, {Size = UDim2.new(1, 0, 0, 40)})
+				CreateTween(arrow, 0.2, {Rotation = 0})
+				callback(opt)
+			end)
+		end
+
+		mainBtn.MouseButton1Click:Connect(function()
+			isOpened = not isOpened
+			if isOpened then
+				local neededHeight = 45 + (#list * 34)
+				CreateTween(dropFrame, 0.2, {Size = UDim2.new(1, 0, 0, neededHeight)})
+				CreateTween(arrow, 0.2, {Rotation = 180})
+			else
+				CreateTween(dropFrame, 0.2, {Size = UDim2.new(1, 0, 0, 40)})
+				CreateTween(arrow, 0.2, {Rotation = 0})
+			end
+		end)
+	end
+
+	-- [ COMPONENTE: TEXTBOX (CAMPO DE TEXTO) ]
+	function elements:CreateTextBox(placeholder, callback)
+		callback = callback or function() end
+
+		local boxFrame = Instance.new("Frame")
+		boxFrame.Size = UDim2.new(1, 0, 0, 40)
+		boxFrame.BackgroundColor3 = Theme.CardBg
+		boxFrame.Parent = pageFrame
+
+		local bfCorner = Instance.new("UICorner")
+		bfCorner.CornerRadius = UDim.new(0, 8)
+		bfCorner.Parent = boxFrame
+
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = 1
+		stroke.Color = Theme.Stroke
+		stroke.Parent = boxFrame
+
+		local box = Instance.new("TextBox")
+		box.Size = UDim2.new(1, -24, 1, 0)
+		box.Position = UDim2.new(0, 12, 0, 0)
+		box.BackgroundTransparency = 1
+		box.PlaceholderText = placeholder
+		box.PlaceholderColor3 = Theme.TextMuted
+		box.Text = ""
+		box.TextColor3 = Theme.TextColor
+		box.Font = Theme.Font
+		box.TextSize = 14
+		box.TextXAlignment = Enum.TextXAlignment.Left
+		box.Parent = boxFrame
+
+		-- Feedback Visual de Foco (Glow Accent)
+		box.Focused:Connect(function() CreateTween(stroke, 0.2, {Color = Theme.Accent}) end)
+		box.FocusLost:Connect(function(enterPressed) 
+			CreateTween(stroke, 0.2, {Color = Theme.Stroke})
+			callback(box.Text, enterPressed)
+		end)
+	end
+
+	return elements
 end
 
--- [4] COMPONENTES DE INTERAÇÃO
-function Page:Section(title: string)
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, 0, 0, 20) lbl.BackgroundTransparency = 1
-    lbl.Text = title lbl.TextColor3 = TokenEngine.Get("Muted"):Get()
-    lbl.Font = Enum.Font.GothamBold lbl.TextSize = 11 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = self.Container
-end
+-- ============================================================================
+-- [[ EXEMPLO PRÁTICO DE USO DA LIBRARY ]]
+-- ============================================================================
 
-function Page:Button(text: string, callback: () -> ())
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, 0, 0, 36) btn.BackgroundColor3 = TokenEngine.Get("Surface"):Get()
-    btn.Text = text btn.TextColor3 = TokenEngine.Get("Text"):Get()
-    btn.Font = TokenEngine.Get("Font"):Get() btn.TextSize = 13 btn.AutoButtonColor = false btn.Parent = self.Container
-    
-    local corner = Instance.new("UICorner") corner.CornerRadius = UDim.new(0, 8) corner.Parent = btn
-    local stroke = Instance.new("UIStroke") stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = btn
-    
-    btn.MouseEnter:Connect(function() AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Card"):Get(), 400, 20) end)
-    btn.MouseLeave:Connect(function() AnalyticalMotion.Link(btn, "BackgroundColor3", TokenEngine.Get("Surface"):Get(), 400, 20) end)
-    
-    btn.MouseButton1Click:Connect(function()
-        task.spawn(function()
-            local ok, err = pcall(callback)
-            if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
-        end)
-    end)
-end
+local Window = Muzysh.Init()
 
-function Page:Toggle(text: string, default: boolean, callback: (boolean) -> ())
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 40) frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get() frame.Parent = self.Container
-    
-    local corner = Instance.new("UICorner") corner.CornerRadius = UDim.new(0, 8) corner.Parent = frame
-    local stroke = Instance.new("UIStroke") stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = frame
-    
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -60, 1, 0) lbl.Position = UDim2.new(0, 12, 0, 0)
-    lbl.BackgroundTransparency = 1 lbl.Text = text
-    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
-    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
-    
-    local box = Instance.new("TextButton")
-    box.Size = UDim2.new(0, 38, 0, 22) box.Position = UDim2.new(1, -50, 0.5, -11)
-    box.BackgroundColor3 = TokenEngine.Get("Card"):Get() box.Text = "" box.AutoButtonColor = false box.Parent = frame
-    
-    local boxCorner = Instance.new("UICorner") boxCorner.CornerRadius = UDim.new(1, 0) boxCorner.Parent = box
-    
-    local inner = Instance.new("Frame")
-    inner.Size = UDim2.new(0, 16, 0, 16) inner.Position = UDim2.new(0, 3, 0.5, -8)
-    inner.BackgroundColor3 = TokenEngine.Get("Muted"):Get() inner.Parent = box
-    
-    local innerCorner = Instance.new("UICorner") innerCorner.CornerRadius = UDim.new(1, 0) innerCorner.Parent = inner
-    
-    local state = StateGraph.CreateState(default)
-    StateGraph.Observe(state, function(v)
-        local targetX = v and 19 or 3
-        local color = v and Color3.fromRGB(255, 255, 255) or TokenEngine.Get("Muted"):Get()
-        local boxColor = v and TokenEngine.Get("Accent"):Get() or TokenEngine.Get("Card"):Get()
-        
-        AnalyticalMotion.Link(inner, "Position", UDim2.new(0, targetX, 0.5, -8), 450, 24)
-        AnalyticalMotion.Link(inner, "BackgroundColor3", color, 450, 24)
-        AnalyticalMotion.Link(box, "BackgroundColor3", boxColor, 450, 24)
-        
-        task.spawn(function()
-            local ok, err = pcall(callback, v)
-            if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
-        end)
-    end)
-    
-    box.MouseButton1Click:Connect(function() state:Set(not state:Get()) end)
-end
-
-function Page:Slider(text: string, min: number, max: number, default: number, callback: (number) -> ())
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, 0, 0, 52) frame.BackgroundColor3 = TokenEngine.Get("Surface"):Get() frame.Parent = self.Container
-    
-    local corner = Instance.new("UICorner") corner.CornerRadius = UDim.new(0, 8) corner.Parent = frame
-    local stroke = Instance.new("UIStroke") stroke.Color = TokenEngine.Get("Border"):Get() stroke.Thickness = 1 stroke.Parent = frame
-    
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0.7, 0, 0, 22) lbl.Position = UDim2.new(0, 12, 0, 6)
-    lbl.BackgroundTransparency = 1 lbl.Text = text
-    lbl.TextColor3 = TokenEngine.Get("Text"):Get() lbl.Font = TokenEngine.Get("Font"):Get()
-    lbl.TextSize = 13 lbl.TextXAlignment = Enum.TextXAlignment.Left lbl.Parent = frame
-    
-    local valLbl = Instance.new("TextLabel")
-    valLbl.Size = UDim2.new(0.3, -12, 0, 22) valLbl.Position = UDim2.new(0.7, 0, 0, 6)
-    valLbl.BackgroundTransparency = 1 valLbl.Text = tostring(default)
-    valLbl.TextColor3 = TokenEngine.Get("AccentGlow"):Get() valLbl.Font = Enum.Font.GothamBold
-    valLbl.TextSize = 13 valLbl.TextXAlignment = Enum.TextXAlignment.Right valLbl.Parent = frame
-    
-    local track = Instance.new("TextButton")
-    track.Size = UDim2.new(1, -24, 0, 5) track.Position = UDim2.new(0, 12, 0, 36)
-    track.BackgroundColor3 = TokenEngine.Get("Card"):Get() track.Text = "" track.AutoButtonColor = false track.Parent = frame
-    
-    local trackCorner = Instance.new("UICorner") trackCorner.CornerRadius = UDim.new(1, 0) trackCorner.Parent = track
-    
-    local fill = Instance.new("Frame")
-    fill.Size = UDim2.new((default - min)/(max - min), 0, 1, 0)
-    fill.BackgroundColor3 = TokenEngine.Get("Accent"):Get() fill.Parent = track
-    
-    local fillCorner = Instance.new("UICorner") fillCorner.CornerRadius = UDim.new(1, 0) fillCorner.Parent = fill
-    
-    local state = StateGraph.CreateState(default)
-    local drag = false
-    
-    local function snap(input: InputObject)
-        local w = track.AbsoluteSize.X if w == 0 then return end
-        local pct = math.clamp((input.Position.X - track.AbsolutePosition.X) / w, 0, 1)
-        local val = math.round((min + (pct * (max - min))) * 10) / 10
-        state:Set(val)
-    end
-    
-    track.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then drag = true snap(input) end
-    end)
-    game:GetService("UserInputService").InputChanged:Connect(function(input)
-        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then snap(input) end
-    end)
-    game:GetService("UserInputService").InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then drag = false end
-    end)
-    
-    StateGraph.Observe(state, function(v)
-        valLbl.Text = tostring(v)
-        AnalyticalMotion.Link(fill, "Size", UDim2.new((v - min)/(max - min), 0, 1, 0), 400, 25)
-        
-        task.spawn(function()
-            local ok, err = pcall(callback, v)
-            if not ok then warn("[KazeUI Error]: " .. tostring(err)) end
-        end)
-    end)
-end
-
-KazeUI.CreateWindow = Window.new
-KazeUI.Theme = ThemeEngine.Apply
-
--- =============================================================================
--- [5] CONTROLES DE TESTE E CRIAÇÃO DA INTERFACE
--- =============================================================================
-
-local Janela = KazeUI.CreateWindow("KazeUI", "Painel Ativo v2.0")
-
-local AbaJogador = Janela:Tab("Jogador")
-local AbaOutros = Janela:Tab("Opções")
-
-AbaJogador:Section("Movimentação")
-
-AbaJogador:Toggle("Super Velocidade", false, function(ativo)
-    local player = game:GetService("Players").LocalPlayer
-    local char = player.Character or player.CharacterAdded:Wait()
-    local humanoid = char:WaitForChild("Humanoid")
-    
-    humanoid.WalkSpeed = ativo and 60 or 16
+-- Criação da Aba Home
+local Home = Window:CreatePage("Home")
+Home:CreateSection("Geral")
+Home:CreateButton("Injetar Script Exemplo", function()
+	print("Muzysh Premium UI carregada perfeitamente no Mobile/PC!")
 end)
 
-AbaJogador:Slider("Altura do Pulo", 50, 300, 50, function(valor)
-    local player = game:GetService("Players").LocalPlayer
-    local char = player.Character or player.CharacterAdded:Wait()
-    local humanoid = char:WaitForChild("Humanoid")
-    
-    humanoid.JumpPower = valor
+Home:CreateToggle("Ativar Auto Farm", false, function(value)
+	print("Auto Farm definido para:", value)
 end)
 
-AbaJogador:Button("Resetar Personagem", function()
-    local player = game:GetService("Players").LocalPlayer
-    if player.Character then
-        player.Character:BreakJoints()
-    end
+Home:CreateSlider("Velocidade do Jogador", 16, 150, 16, function(value)
+	if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+		LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed = value
+	end
 end)
 
-AbaOutros:Section("Status")
-
-AbaOutros:Button("Imprimir no Console", function()
-    print("[KazeUI] Teste de clique realizado com sucesso!")
+-- Criação da Aba Scripts
+local Scripts = Window:CreatePage("Scripts")
+Scripts:CreateSection("Teleportes")
+Scripts:CreateDropdown("Selecione o Mundo", {"Mundo Inicial", "Zona Desértica", "Ilha de Lava", "Nível Secreto"}, function(selected)
+	print("Teleportando para:", selected)
 end)
+
+Scripts:CreateSection("Customização")
+Scripts:CreateTextBox("Digite o ID da Animação...", function(text, enterPressed)
+	if enterPressed then
+		print("ID enviado:", text)
+	end
+end)
+
+-- Criação da Aba Configurações
+local Settings = Window:CreatePage("Settings")
+Settings:CreateSection("Interface")
+Settings:CreateToggle("Ativar Notificações", true, function(state)
+	print("Notificações:", state)
+end)
+
+return Muzysh
